@@ -22,9 +22,14 @@ pub fn create() -> Result<Box<dyn InjectBackend>> {
     Ok(Box::new(linux_wayland::backend()?))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn create() -> Result<Box<dyn InjectBackend>> {
-    anyhow::bail!("no inject backend implemented for this platform yet")
+    Ok(Box::new(rdev_backend::backend()?))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub fn create() -> Result<Box<dyn InjectBackend>> {
+    anyhow::bail!("no inject backend for this platform")
 }
 
 #[cfg(test)]
@@ -37,9 +42,9 @@ mod tests {
         assert!(create().is_ok());
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn create_returns_err_on_non_linux() {
-        assert!(create().is_err());
+    fn create_returns_ok_on_macos_windows() {
+        assert!(create().is_ok());
     }
 }
