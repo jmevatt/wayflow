@@ -25,7 +25,7 @@ postcard       = { version = "1",    features = ["alloc"] }
 serde          = { version = "1",    features = ["derive"] }
 
 # TLS
-rustls         = { version = "0.23", features = ["ring"] }
+rustls         = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 rcgen          = "0.13"
 
