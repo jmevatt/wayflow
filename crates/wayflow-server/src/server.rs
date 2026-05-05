@@ -1,7 +1,9 @@
-// Server connection loop.
+// Server connection loop + event routing.
 //
-// Phase 1: TLS accept, handshake, clipboard fan-out, ping/pong keepalive.
-// Phase 2 (TODO): wire up the CaptureBackend -- edge detection + event routing.
+// Two responsibilities:
+//   1. handle_stream: TLS accept, handshake, clipboard fan-out, ping/pong.
+//   2. route_events:  translate InputEvents from the capture backend into
+//      S2C messages for the focused client, using edge detection.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use anyhow::{bail, Result};
@@ -12,11 +14,18 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
-use wayflow_core::{config::Config, tls, transport};
+use wayflow_core::{
+    config::Config,
+    layout::{ServerLayout, map_to_client},
+    tls,
+    transport,
+};
 use wayflow_proto::{C2S, HelloS2C, S2C, ScreenInfo, PROTOCOL_VERSION};
 
-// Map of client name -> channel to deliver server-to-client messages.
-type Clients = Arc<RwLock<HashMap<String, mpsc::Sender<S2C>>>>;
+use crate::backend::InputEvent;
+
+// Map of client name -> (primary screen, channel to deliver S2C messages).
+type Clients = Arc<RwLock<HashMap<String, (ScreenInfo, mpsc::Sender<S2C>)>>>;
 
 const PING_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
@@ -31,7 +40,127 @@ pub async fn run(config: Config) -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     info!("listening on {}", listener.local_addr()?);
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
+
+    // Placeholder server monitors -- phase 2 queries the capture backend for real layout.
+    let server_monitors = vec![ScreenInfo {
+        name: config.server.name.clone(),
+        x: 0, y: 0, width: 1920, height: 1080,
+    }];
+
+    let (event_tx, event_rx) = mpsc::channel::<InputEvent>(256);
+
+    let routing_clients = clients.clone();
+    let routing_config = Arc::new(config.clone());
+    tokio::spawn(async move {
+        if let Err(e) = route_events(event_rx, routing_clients, routing_config, server_monitors).await {
+            warn!("route_events exited: {e:#}");
+        }
+    });
+
+    let event_tx_capture = event_tx.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = crate::backend::start_capture(event_tx_capture) {
+            warn!("capture backend error: {e:#}");
+        }
+    });
+
     serve(Arc::new(config), listener, acceptor, clients).await
+}
+
+async fn route_events(
+    mut rx: mpsc::Receiver<InputEvent>,
+    clients: Clients,
+    config: Arc<Config>,
+    server_monitors: Vec<ScreenInfo>,
+) -> Result<()> {
+    let layout = ServerLayout::new(server_monitors);
+    let mut active_client: Option<String> = None;
+    let mut server_cursor = (0i32, 0i32);
+    let mut client_cursor = (0i32, 0i32);
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            InputEvent::MouseMoveAbs { x, y } => {
+                let sx = x as i32;
+                let sy = y as i32;
+
+                if active_client.is_none() {
+                    if let Some(edge) = layout.crossed_edge(sx, sy) {
+                        if let Some(entry) = config.clients.iter().find(|c| c.edge == edge) {
+                            let map = clients.read().await;
+                            if let Some((screen, tx)) = map.get(&entry.name) {
+                                let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
+                                let _ = tx.send(S2C::EnterScreen { x: cx, y: cy }).await;
+                                active_client = Some(entry.name.clone());
+                                client_cursor = (cx as i32, cy as i32);
+                                debug!("cursor -> {:?} at ({cx}, {cy})", entry.name);
+                            }
+                        }
+                    }
+                    server_cursor = (sx, sy);
+                } else {
+                    let name = active_client.as_ref().unwrap().clone();
+                    let dx = sx - server_cursor.0;
+                    let dy = sy - server_cursor.1;
+                    server_cursor = (sx, sy);
+
+                    let map = clients.read().await;
+                    if let Some((screen, tx)) = map.get(&name) {
+                        let new_cx = (client_cursor.0 + dx).clamp(0, screen.width as i32 - 1);
+                        let new_cy = (client_cursor.1 + dy).clamp(0, screen.height as i32 - 1);
+                        client_cursor = (new_cx, new_cy);
+
+                        let at_edge = new_cx == 0
+                            || new_cx == screen.width as i32 - 1
+                            || new_cy == 0
+                            || new_cy == screen.height as i32 - 1;
+
+                        if at_edge {
+                            let _ = tx.send(S2C::LeaveScreen).await;
+                            drop(map);
+                            active_client = None;
+                            debug!("cursor returned to server");
+                        } else {
+                            let _ = tx.send(S2C::MouseMoveAbs {
+                                x: new_cx as u16,
+                                y: new_cy as u16,
+                            }).await;
+                        }
+                    } else {
+                        active_client = None;
+                    }
+                }
+            }
+
+            InputEvent::MouseButton { button, pressed } => {
+                if let Some(ref name) = active_client {
+                    let map = clients.read().await;
+                    if let Some((_, tx)) = map.get(name) {
+                        let _ = tx.send(S2C::MouseButton { button, pressed }).await;
+                    }
+                }
+            }
+
+            InputEvent::Scroll { dx, dy } => {
+                if let Some(ref name) = active_client {
+                    let map = clients.read().await;
+                    if let Some((_, tx)) = map.get(name) {
+                        let _ = tx.send(S2C::Scroll { dx: dx as i16, dy: dy as i16 }).await;
+                    }
+                }
+            }
+
+            InputEvent::Key { keycode, pressed, modifiers } => {
+                if let Some(ref name) = active_client {
+                    let map = clients.read().await;
+                    if let Some((_, tx)) = map.get(name) {
+                        let _ = tx.send(S2C::KeyEvent { keycode, pressed, modifiers }).await;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn serve(
@@ -93,13 +222,17 @@ where
     }
     info!("client {:?} connected from {peer}", hello.name);
 
-    // Placeholder server screen -- replaced in phase 2 by the capture backend.
+    let client_screen = hello.screens
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ScreenInfo {
+            name: hello.name.clone(),
+            x: 0, y: 0, width: 1920, height: 1080,
+        });
+
     let server_screen = ScreenInfo {
         name: config.server.name.clone(),
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080,
+        x: 0, y: 0, width: 1920, height: 1080,
     };
     let mut screens = vec![server_screen];
     screens.extend(hello.screens.clone());
@@ -112,9 +245,8 @@ where
     // --- Register client ---
     let (tx, mut rx) = mpsc::channel::<S2C>(64);
     let name = hello.name.clone();
-    clients.write().await.insert(name.clone(), tx.clone());
+    clients.write().await.insert(name.clone(), (client_screen, tx.clone()));
 
-    // Writer task: drains the mpsc queue and sends frames to the stream.
     let write_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if transport::send_s2c(&mut w, &msg).await.is_err() {
@@ -123,7 +255,6 @@ where
         }
     });
 
-    // Ping task: sends a Ping every PING_INTERVAL; stops when the sender is closed.
     let ping_tx = tx.clone();
     let ping_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(PING_INTERVAL);
@@ -142,7 +273,7 @@ where
             Ok(C2S::ClipboardData(content)) => {
                 info!("clipboard update from {name}");
                 let map = clients.read().await;
-                for (peer_name, peer_tx) in map.iter() {
+                for (peer_name, (_, peer_tx)) in map.iter() {
                     if peer_name != &name {
                         let _ = peer_tx.send(S2C::ClipboardData(content.clone())).await;
                     }
@@ -218,11 +349,9 @@ mod tests {
         assert!(matches!(response, S2C::Hello(_)));
         if let S2C::Hello(h) = response {
             assert_eq!(h.version, PROTOCOL_VERSION);
-            // Server screen + client screen
             assert_eq!(h.screens.len(), 2);
         }
 
-        // Client disconnects cleanly
         drop(cw);
         drop(cr);
         handle.await.unwrap().unwrap();
@@ -238,7 +367,6 @@ mod tests {
 
         let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
 
-        // "unknown" is not in config.clients but server should accept anyway
         let response = do_handshake(&mut cw, &mut cr, "unknown").await;
         assert!(matches!(response, S2C::Hello(_)));
 
@@ -278,7 +406,6 @@ mod tests {
 
         let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
 
-        // Send Pong instead of Hello
         transport::send_c2s(&mut cw, &C2S::Pong).await.unwrap();
 
         let result = handle.await.unwrap();
@@ -299,7 +426,6 @@ mod tests {
         let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
         do_handshake(&mut cw, &mut cr, "c").await;
 
-        // Send a Pong -- server should not error
         transport::send_c2s(&mut cw, &C2S::Pong).await.unwrap();
 
         drop(cw);
@@ -326,7 +452,6 @@ mod tests {
 
         drop(cw);
         drop(cr);
-        // Should still exit cleanly -- unexpected re-Hello is warned but not fatal
         handle.await.unwrap().unwrap();
     }
 
@@ -337,7 +462,6 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        // Connect client A
         let (ss_a, cs_a) = duplex(65536);
         let (sr_a, sw_a) = split(ss_a);
         let (mut cr_a, mut cw_a) = split(cs_a);
@@ -346,7 +470,6 @@ mod tests {
         ));
         do_handshake(&mut cw_a, &mut cr_a, "known-client").await;
 
-        // Connect client B
         let (ss_b, cs_b) = duplex(65536);
         let (sr_b, sw_b) = split(ss_b);
         let (mut cr_b, mut cw_b) = split(cs_b);
@@ -355,17 +478,11 @@ mod tests {
         ));
         do_handshake(&mut cw_b, &mut cr_b, "other-client").await;
 
-        // A sends clipboard
         let content = ClipboardContent::Text("shared text".into());
         transport::send_c2s(&mut cw_a, &C2S::ClipboardData(content.clone())).await.unwrap();
 
-        // B should receive it
         let msg = transport::recv_s2c(&mut cr_b).await.unwrap();
         assert_eq!(msg, S2C::ClipboardData(content));
-
-        // A should NOT receive its own clipboard
-        // (verify by sending a known Ping marker and checking it's the next message)
-        // We do this by not reading from cr_a and verifying no immediate data without timing.
     }
 
     // --- Client registration and cleanup ---
@@ -384,18 +501,15 @@ mod tests {
         ));
         do_handshake(&mut cw, &mut cr, "known-client").await;
 
-        // Client should be in the map now
         {
             let map = clients.read().await;
             assert!(map.contains_key("known-client"), "client not registered");
         }
 
-        // Disconnect
         drop(cw);
         drop(cr);
         handle.await.unwrap().unwrap();
 
-        // Map should be empty after cleanup
         let map = clients.read().await;
         assert!(map.is_empty(), "client not removed after disconnect");
     }
@@ -415,10 +529,219 @@ mod tests {
         tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
         do_handshake(&mut cw, &mut cr, "known-client").await;
 
-        // Advance time past PING_INTERVAL (10s)
         tokio::time::advance(tokio::time::Duration::from_secs(11)).await;
 
         let msg = transport::recv_s2c(&mut cr).await.unwrap();
         assert_eq!(msg, S2C::Ping);
+    }
+
+    // --- route_events ---
+
+    fn routing_config() -> Arc<Config> {
+        Arc::new(Config {
+            server: ServerConfig { name: "server".into(), port: 24800 },
+            clients: vec![
+                ClientEntry { name: "mac".into(), edge: Edge::Right, offset: 0 },
+            ],
+        })
+    }
+
+    fn server_monitors() -> Vec<ScreenInfo> {
+        vec![ScreenInfo { name: "server".into(), x: 0, y: 0, width: 2560, height: 1440 }]
+    }
+
+    fn connected_clients() -> (Clients, mpsc::Receiver<S2C>) {
+        let (tx, rx) = mpsc::channel(64);
+        let screen = ScreenInfo { name: "mac".into(), x: 0, y: 0, width: 1920, height: 1080 };
+        let mut map = HashMap::new();
+        map.insert("mac".into(), (screen, tx));
+        (Arc::new(RwLock::new(map)), rx)
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<S2C>) -> Vec<S2C> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn edge_crossing_sends_enter_screen() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        // Right edge of 2560x1440 server at y=720
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs, vec![S2C::EnterScreen { x: 0, y: 720 }]);
+    }
+
+    #[tokio::test]
+    async fn no_enter_when_cursor_not_at_edge() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        tx.send(InputEvent::MouseMoveAbs { x: 1000.0, y: 720.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        assert!(drain(&mut client_rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn mouse_move_forwarded_while_on_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        // Enter client: cursor at right edge (2559, 720) -> EnterScreen { x: 0, y: 720 }
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        // Move delta (+5, +10): server (2564, 730), client (0+5, 720+10) = (5, 730)
+        tx.send(InputEvent::MouseMoveAbs { x: 2564.0, y: 730.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[0], S2C::EnterScreen { x: 0, y: 720 });
+        assert_eq!(msgs[1], S2C::MouseMoveAbs { x: 5, y: 730 });
+    }
+
+    #[tokio::test]
+    async fn leave_screen_when_cursor_hits_client_left_edge() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        // Enter at right edge -> client cursor at (0, 720)
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        // Delta (-10, 0) -> client (0-10, 720) = (-10, clamped to 0) -> at left edge -> LeaveScreen
+        tx.send(InputEvent::MouseMoveAbs { x: 2549.0, y: 720.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[0], S2C::EnterScreen { x: 0, y: 720 });
+        assert_eq!(msgs[1], S2C::LeaveScreen);
+    }
+
+    #[tokio::test]
+    async fn key_forwarded_to_active_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        tx.send(InputEvent::Key {
+            keycode: 65,
+            pressed: true,
+            modifiers: Modifiers { shift: true, ..Modifiers::default() },
+        }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[0], S2C::EnterScreen { x: 0, y: 720 });
+        assert_eq!(msgs[1], S2C::KeyEvent {
+            keycode: 65,
+            pressed: true,
+            modifiers: Modifiers { shift: true, ..Modifiers::default() },
+        });
+    }
+
+    #[tokio::test]
+    async fn button_forwarded_to_active_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        tx.send(InputEvent::MouseButton { button: MouseButton::Left, pressed: true }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[1], S2C::MouseButton { button: MouseButton::Left, pressed: true });
+    }
+
+    #[tokio::test]
+    async fn scroll_forwarded_to_active_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        tx.send(InputEvent::Scroll { dx: 3.0, dy: -2.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[1], S2C::Scroll { dx: 3, dy: -2 });
+    }
+
+    #[tokio::test]
+    async fn events_not_forwarded_without_active_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+
+        tx.send(InputEvent::Key { keycode: 65, pressed: true, modifiers: Modifiers::default() }).await.unwrap();
+        tx.send(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }).await.unwrap();
+        tx.send(InputEvent::Scroll { dx: 1.0, dy: 1.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        assert!(drain(&mut client_rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_client_in_config_no_enter() {
+        // Config has no client for the Right edge -> cursor at edge but no EnterScreen
+        let (clients, mut client_rx) = connected_clients();
+        let config = Arc::new(Config {
+            server: ServerConfig { name: "server".into(), port: 24800 },
+            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
+        });
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors()));
+
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        assert!(drain(&mut client_rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnected_client_releases_focus() {
+        // Client is removed from map mid-session
+        let (clients, _client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(rx, clients.clone(), routing_config(), server_monitors()));
+
+        // Enter the client
+        tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        // Remove client from map to simulate disconnect
+        clients.write().await.remove("mac");
+        // Send another event -- routing should silently drop focus
+        tx.send(InputEvent::MouseMoveAbs { x: 2560.0, y: 720.0 }).await.unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_events_exits_when_channel_closed() {
+        let clients = empty_clients();
+        let config = routing_config();
+        let (tx, rx) = mpsc::channel::<InputEvent>(16);
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors()));
+
+        drop(tx);
+        task.await.unwrap().unwrap();
     }
 }

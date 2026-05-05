@@ -29,6 +29,20 @@ pub mod linux_wayland;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod rdev_backend;
 
+/// Start the platform capture backend on the current thread.
+/// This function blocks until the backend exits (or errors).
+/// Call from a dedicated `std::thread::spawn`.
+pub fn start_capture(tx: mpsc::Sender<InputEvent>) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    return linux_wayland::backend().start(tx);
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    return rdev_backend::backend().start(tx);
+
+    #[allow(unreachable_code)]
+    { let _ = tx; Err(anyhow::anyhow!("no capture backend for this platform")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
