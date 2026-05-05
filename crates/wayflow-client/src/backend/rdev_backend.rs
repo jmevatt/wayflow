@@ -65,6 +65,10 @@ impl InjectBackend for RdevInject {
     }
 
     fn scroll(&mut self, dx: i16, dy: i16) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return scroll_macos(dx, dy);
+
+        #[cfg(not(target_os = "macos"))]
         sim(&EventType::Wheel { delta_x: dx as i64, delta_y: dy as i64 })
     }
 
@@ -93,6 +97,29 @@ impl InjectBackend for RdevInject {
             sim(&EventType::KeyRelease(key))
         }
     }
+}
+
+/// Post a scroll CGEvent using LINE units so macOS applies its native scroll acceleration.
+/// rdev uses PIXEL units with our small values (~1), which produces imperceptible scroll.
+/// Deskflow uses 3 lines/click with kCGScrollEventUnitLine -- matches native wheel feel.
+#[cfg(target_os = "macos")]
+fn scroll_macos(dx: i16, dy: i16) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    const LINES_PER_CLICK: i32 = 3;
+    let vy = dy as i32 * LINES_PER_CLICK;
+    let vx = dx as i32 * LINES_PER_CLICK;
+    if vx == 0 && vy == 0 {
+        return Ok(());
+    }
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
+    // wheel1 = vertical axis, wheel2 = horizontal axis
+    let event = CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, vy, vx, 0)
+        .map_err(|_| anyhow::anyhow!("CGEvent::new_scroll_event failed"))?;
+    event.post(CGEventTapLocation::HID);
+    Ok(())
 }
 
 /// Post a mouse move (or drag) CGEvent with the correct event type for the current button state.
