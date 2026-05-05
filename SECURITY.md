@@ -38,5 +38,8 @@ Things that are out of scope:
 Wayflow operates on a trusted LAN. The TLS connection uses a self-signed server
 certificate accepted on first connection (TOFU). There is no cryptographic
 authentication of clients -- any machine that knows the server address can connect.
-This is a known limitation and by design for the current phase. Contributions to
-improve the authentication model are welcome (see CONTRIBUTING.md).
+This is a known limitation and by design for the current phase.
+
+Security-focused PRs are welcome -- improving the authentication model, hardening
+the TLS configuration, or tightening input validation. Open an issue first to
+discuss the approach, then send the PR (see CONTRIBUTING.md).
