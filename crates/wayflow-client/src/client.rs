@@ -1,7 +1,6 @@
 // Client connection loop.
 //
-// Phase 1: TLS connect, handshake, event dispatch to the inject backend, Pong.
-// Phase 2 (TODO): real screen dimensions from backend, clipboard read/write.
+// Client connection loop: TLS connect, handshake, event dispatch to the inject backend, Pong.
 
 use anyhow::{bail, Result};
 use rustls::pki_types::ServerName;
@@ -29,14 +28,18 @@ pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     let tls = connector.connect(server_name, tcp).await?;
     let (mut r, mut w) = tokio::io::split(tls);
 
+    // Create backend before handshake so we can query real screen dimensions.
+    let mut backend = crate::backend::create()?;
+    let (sw, sh) = backend.screen_size();
+    info!("screen size: {sw}x{sh}");
+
     // --- Handshake ---
-    // Placeholder screen dimensions -- phase 2 queries the inject backend for the real size.
     let my_screen = ScreenInfo {
         name: own_name.clone(),
         x: 0,
         y: 0,
-        width: 1920,
-        height: 1080,
+        width: sw,
+        height: sh,
     };
     transport::send_c2s(&mut w, &C2S::Hello(HelloC2S {
         version: PROTOCOL_VERSION,
@@ -53,7 +56,6 @@ pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     }
     info!("handshake complete; server knows {} screen(s)", server_hello.screens.len());
 
-    let mut backend = crate::backend::create()?;
     event_loop(r, w, backend.as_mut()).await
 }
 

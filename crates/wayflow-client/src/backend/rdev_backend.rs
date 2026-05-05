@@ -68,6 +68,17 @@ impl InjectBackend for RdevInject {
         sim(&EventType::Wheel { delta_x: dx as i64, delta_y: dy as i64 })
     }
 
+    fn screen_size(&self) -> (u16, u16) {
+        #[cfg(target_os = "macos")]
+        {
+            use core_graphics::display::CGDisplay;
+            let bounds = CGDisplay::main().bounds();
+            return (bounds.size.width as u16, bounds.size.height as u16);
+        }
+        #[cfg(not(target_os = "macos"))]
+        (1920, 1080)
+    }
+
     fn key_event(&mut self, keycode: u32, pressed: bool, _modifiers: Modifiers) -> Result<()> {
         let key = match rdev_keys::hid_to_rdev(keycode) {
             Some(k) => k,

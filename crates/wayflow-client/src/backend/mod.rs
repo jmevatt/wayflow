@@ -8,6 +8,11 @@ pub trait InjectBackend: Send + 'static {
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()>;
     fn scroll(&mut self, dx: i16, dy: i16) -> Result<()>;
     fn key_event(&mut self, keycode: u32, pressed: bool, modifiers: Modifiers) -> Result<()>;
+    /// Return the primary screen's logical dimensions in points/pixels.
+    /// Used to report screen size to the server during handshake.
+    fn screen_size(&self) -> (u16, u16) {
+        (1920, 1080)
+    }
 }
 
 #[cfg(target_os = "linux")]
