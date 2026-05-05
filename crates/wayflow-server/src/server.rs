@@ -41,30 +41,30 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     info!("listening on {}", listener.local_addr()?);
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
 
-    // Placeholder server monitors -- phase 2 queries the capture backend for real layout.
-    let server_monitors = vec![ScreenInfo {
+    let (event_tx, event_rx) = mpsc::channel::<InputEvent>(256);
+    let (release_tx, release_rx) = mpsc::channel::<()>(4);
+    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+
+    // Seed monitors with a placeholder; the capture backend overwrites this with real
+    // zone data from the compositor once the InputCapture session is established.
+    let initial_monitors = vec![ScreenInfo {
         name: config.server.name.clone(),
         x: 0, y: 0, width: 1920, height: 1080,
     }];
+    let (monitors_tx, monitors_rx) = watch::channel(initial_monitors);
 
-    let (event_tx, event_rx) = mpsc::channel::<InputEvent>(256);
-    // release_tx is signalled by route_events when cursor focus returns to the server.
-    // The capture backend listens on release_rx and releases its compositor-level grab.
-    let (release_tx, release_rx) = mpsc::channel::<()>(4);
-
-    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
     tokio::spawn(watch_config(config_path, config_tx));
 
     let routing_clients = clients.clone();
     tokio::spawn(async move {
-        if let Err(e) = route_events(event_rx, routing_clients, config_rx, server_monitors, release_tx).await {
+        if let Err(e) = route_events(event_rx, routing_clients, config_rx, monitors_rx, release_tx).await {
             warn!("route_events exited: {e:#}");
         }
     });
 
     let event_tx_capture = event_tx.clone();
     std::thread::spawn(move || {
-        if let Err(e) = crate::backend::start_capture(event_tx_capture, release_rx) {
+        if let Err(e) = crate::backend::start_capture(event_tx_capture, release_rx, monitors_tx) {
             warn!("capture backend error: {e:#}");
         }
     });
@@ -76,15 +76,20 @@ async fn route_events(
     mut rx: mpsc::Receiver<InputEvent>,
     clients: Clients,
     config_rx: watch::Receiver<Arc<Config>>,
-    server_monitors: Vec<ScreenInfo>,
+    mut monitors_rx: watch::Receiver<Vec<ScreenInfo>>,
     release_tx: mpsc::Sender<()>,
 ) -> Result<()> {
-    let layout = ServerLayout::new(server_monitors);
+    let mut layout = ServerLayout::new(monitors_rx.borrow().clone());
     let mut active_client: Option<String> = None;
     let mut server_cursor = (0i32, 0i32);
     let mut client_cursor = (0i32, 0i32);
 
     while let Some(event) = rx.recv().await {
+        if monitors_rx.has_changed().unwrap_or(false) {
+            layout = ServerLayout::new(monitors_rx.borrow_and_update().clone());
+            info!("server monitor layout updated: {} monitor(s)", layout.monitor_count());
+        }
+
         match event {
             InputEvent::MouseMoveAbs { x, y } => {
                 let sx = x as i32;
@@ -597,8 +602,10 @@ mod tests {
         })).1
     }
 
-    fn server_monitors() -> Vec<ScreenInfo> {
-        vec![ScreenInfo { name: "server".into(), x: 0, y: 0, width: 2560, height: 1440 }]
+    fn server_monitors() -> watch::Receiver<Vec<ScreenInfo>> {
+        watch::channel(vec![
+            ScreenInfo { name: "server".into(), x: 0, y: 0, width: 2560, height: 1440 },
+        ]).1
     }
 
     fn connected_clients() -> (Clients, mpsc::Receiver<S2C>) {

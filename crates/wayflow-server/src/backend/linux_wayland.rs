@@ -22,21 +22,26 @@ use reis::{
     event::{DeviceCapability, EiEvent},
     tokio::{EiConvertEventStream, EiEventStream},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
-use wayflow_proto::{Modifiers, MouseButton};
+use wayflow_proto::{Modifiers, MouseButton, ScreenInfo};
 
 use super::{CaptureBackend, InputEvent};
 
 pub struct LinuxWaylandCapture;
 
 impl CaptureBackend for LinuxWaylandCapture {
-    fn start(self, tx: mpsc::Sender<InputEvent>, release_rx: mpsc::Receiver<()>) -> Result<()> {
+    fn start(
+        self,
+        tx: mpsc::Sender<InputEvent>,
+        release_rx: mpsc::Receiver<()>,
+        monitors_tx: watch::Sender<Vec<ScreenInfo>>,
+    ) -> Result<()> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build tokio runtime for capture")?
-            .block_on(capture_async(tx, release_rx))
+            .block_on(capture_async(tx, release_rx, monitors_tx))
     }
 }
 
@@ -47,6 +52,7 @@ pub fn backend() -> LinuxWaylandCapture {
 async fn capture_async(
     tx: mpsc::Sender<InputEvent>,
     mut release_rx: mpsc::Receiver<()>,
+    monitors_tx: watch::Sender<Vec<ScreenInfo>>,
 ) -> Result<()> {
     info!("connecting to XDG InputCapture portal");
 
@@ -67,8 +73,20 @@ async fn capture_async(
 
     let zone_set = zones.zone_set();
     let regions: Vec<Region> = zones.regions().to_vec();
+
+    // Publish actual monitor layout to route_events before setting barriers.
+    let screen_infos: Vec<ScreenInfo> = regions.iter().map(|r| ScreenInfo {
+        name: String::new(),
+        x: r.x_offset(),
+        y: r.y_offset(),
+        width: r.width() as u16,
+        height: r.height() as u16,
+    }).collect();
+    debug!("zones: {:?}", screen_infos.iter().map(|s| format!("{}x{}+{}+{}", s.width, s.height, s.x, s.y)).collect::<Vec<_>>());
+    let _ = monitors_tx.send(screen_infos);
+
     let barriers = build_barriers(&regions);
-    debug!("setting {} barriers across {} zone(s)", barriers.len(), regions.len());
+    debug!("setting {} external barriers across {} zone(s)", barriers.len(), regions.len());
 
     let barrier_resp = portal
         .set_pointer_barriers(&session, &barriers, zone_set)
@@ -292,19 +310,67 @@ fn nudge_inside(pos: (f64, f64), regions: &[Region]) -> (f64, f64) {
     pos
 }
 
+/// Returns true if `region` has another region directly adjacent on its right edge
+/// (i.e., the two regions share an internal seam and no external barrier should be placed there).
+fn has_right_neighbor(regions: &[Region], r: &Region) -> bool {
+    let x2 = r.x_offset() + r.width() as i32;
+    let ry = r.y_offset();
+    let ry2 = ry + r.height() as i32;
+    regions.iter().any(|o| {
+        o.x_offset() == x2
+            && o.y_offset() < ry2
+            && o.y_offset() + o.height() as i32 > ry
+    })
+}
+
+fn has_left_neighbor(regions: &[Region], r: &Region) -> bool {
+    let rx = r.x_offset();
+    let ry = r.y_offset();
+    let ry2 = ry + r.height() as i32;
+    regions.iter().any(|o| {
+        o.x_offset() + o.width() as i32 == rx
+            && o.y_offset() < ry2
+            && o.y_offset() + o.height() as i32 > ry
+    })
+}
+
+fn has_bottom_neighbor(regions: &[Region], r: &Region) -> bool {
+    let y2 = r.y_offset() + r.height() as i32;
+    let rx = r.x_offset();
+    let rx2 = rx + r.width() as i32;
+    regions.iter().any(|o| {
+        o.y_offset() == y2
+            && o.x_offset() < rx2
+            && o.x_offset() + o.width() as i32 > rx
+    })
+}
+
+fn has_top_neighbor(regions: &[Region], r: &Region) -> bool {
+    let ry = r.y_offset();
+    let rx = r.x_offset();
+    let rx2 = rx + r.width() as i32;
+    regions.iter().any(|o| {
+        o.y_offset() + o.height() as i32 == ry
+            && o.x_offset() < rx2
+            && o.x_offset() + o.width() as i32 > rx
+    })
+}
+
 fn build_barriers(regions: &[Region]) -> Vec<Barrier> {
     let mut barriers = Vec::with_capacity(regions.len() * 4);
     let mut id: u32 = 1;
+    let nz = |n: u32| -> BarrierID { NonZeroU32::new(n).unwrap() };
     for region in regions {
         let x  = region.x_offset();
         let y  = region.y_offset();
         let x2 = x + region.width()  as i32 - 1;
         let y2 = y + region.height() as i32 - 1;
-        let nz = |n: u32| -> BarrierID { NonZeroU32::new(n).unwrap() };
-        barriers.push(Barrier::new(nz(id),     (x2, y,  x2, y2))); id += 1; // right
-        barriers.push(Barrier::new(nz(id),     (x,  y,  x,  y2))); id += 1; // left
-        barriers.push(Barrier::new(nz(id),     (x,  y2, x2, y2))); id += 1; // bottom
-        barriers.push(Barrier::new(nz(id),     (x,  y,  x2, y)));  id += 1; // top
+        // Only place a barrier on edges that are the outer boundary of the desktop.
+        // Skip edges where an adjacent monitor forms an internal seam.
+        if !has_right_neighbor(regions, region)  { barriers.push(Barrier::new(nz(id), (x2, y,  x2, y2))); id += 1; }
+        if !has_left_neighbor(regions, region)   { barriers.push(Barrier::new(nz(id), (x,  y,  x,  y2))); id += 1; }
+        if !has_bottom_neighbor(regions, region) { barriers.push(Barrier::new(nz(id), (x,  y2, x2, y2))); id += 1; }
+        if !has_top_neighbor(regions, region)    { barriers.push(Barrier::new(nz(id), (x,  y,  x2, y)));  id += 1; }
     }
     barriers
 }

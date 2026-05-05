@@ -22,9 +22,16 @@ use wayflow_proto::{Modifiers, MouseButton};
 pub struct RdevCapture;
 
 impl CaptureBackend for RdevCapture {
-    fn start(self, tx: mpsc::Sender<InputEvent>, release_rx: mpsc::Receiver<()>) -> Result<()> {
-        // release_rx is not needed: rdev doesn't hold a compositor grab.
+    fn start(
+        self,
+        tx: mpsc::Sender<InputEvent>,
+        release_rx: mpsc::Receiver<()>,
+        monitors_tx: tokio::sync::watch::Sender<Vec<wayflow_proto::ScreenInfo>>,
+    ) -> Result<()> {
+        // release_rx and monitors_tx are not used: rdev doesn't hold a compositor grab
+        // and doesn't have an OS API to query monitor layout here.
         drop(release_rx);
+        drop(monitors_tx);
 
         let mut modifiers = Modifiers::default();
 
