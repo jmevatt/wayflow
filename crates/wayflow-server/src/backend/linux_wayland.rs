@@ -38,3 +38,33 @@ impl CaptureBackend for LinuxWaylandCapture {
 pub fn backend() -> LinuxWaylandCapture {
     LinuxWaylandCapture
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn backend_fn_returns_capture() {
+        let _b = backend();
+    }
+
+    #[test]
+    fn release_grab_returns_ok() {
+        let b = backend();
+        assert!(b.release_grab().is_ok());
+    }
+
+    #[test]
+    fn acquire_grab_returns_ok() {
+        let b = backend();
+        assert!(b.acquire_grab().is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_returns_ok() {
+        let b = backend();
+        let (tx, _rx) = mpsc::channel::<InputEvent>(1);
+        assert!(b.start(tx).is_ok());
+    }
+}

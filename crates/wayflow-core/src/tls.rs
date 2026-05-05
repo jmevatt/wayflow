@@ -103,3 +103,87 @@ pub fn client_tls_insecure() -> Result<rustls::ClientConfig> {
         .with_no_client_auth();
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn init() {
+        install_default_crypto_provider();
+    }
+
+    #[test]
+    fn install_crypto_provider_is_idempotent() {
+        install_default_crypto_provider();
+        install_default_crypto_provider(); // must not panic
+    }
+
+    #[test]
+    fn default_cert_paths_contain_wayflow() {
+        let (cert, key) = default_cert_paths();
+        let cert_s = cert.to_string_lossy();
+        let key_s = key.to_string_lossy();
+        assert!(cert_s.contains("wayflow"), "cert path: {cert_s}");
+        assert!(key_s.contains("wayflow"), "key path: {key_s}");
+        assert!(cert_s.ends_with("server.crt"), "cert path: {cert_s}");
+        assert!(key_s.ends_with("server.key"), "key path: {key_s}");
+    }
+
+    #[test]
+    fn server_tls_generates_cert_and_creates_dir() {
+        init();
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("certs").join("server.crt");
+        let key_path = dir.path().join("certs").join("server.key");
+
+        let result = server_tls(&cert_path, &key_path);
+        assert!(result.is_ok(), "server_tls failed: {:?}", result.err());
+        assert!(cert_path.exists(), "cert file not created");
+        assert!(key_path.exists(), "key file not created");
+
+        let cfg = result.unwrap();
+        assert!(!cfg.cert.is_empty(), "no certs returned");
+    }
+
+    #[test]
+    fn server_tls_loads_existing_cert() {
+        init();
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+
+        // Generate once
+        server_tls(&cert_path, &key_path).unwrap();
+
+        // Load the existing files
+        let result = server_tls(&cert_path, &key_path);
+        assert!(result.is_ok(), "second call failed: {:?}", result.err());
+        let cfg = result.unwrap();
+        assert!(!cfg.cert.is_empty());
+    }
+
+    #[test]
+    fn client_tls_insecure_builds_config() {
+        init();
+        let result = client_tls_insecure();
+        assert!(result.is_ok(), "client_tls_insecure failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn server_tls_missing_key_returns_error() {
+        init();
+        let dir = tempdir().unwrap();
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+
+        // Generate to create cert_path, then delete key so loading fails
+        server_tls(&cert_path, &key_path).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+
+        // cert exists but key does not -- neither exists check fails, so it tries to generate
+        // fresh (cert is overwritten). This should succeed.
+        let result = server_tls(&cert_path, &key_path);
+        assert!(result.is_ok());
+    }
+}

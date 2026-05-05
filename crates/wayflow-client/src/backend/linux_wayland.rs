@@ -52,3 +52,59 @@ impl InjectBackend for LinuxWaylandInject {
 pub fn backend() -> Result<LinuxWaylandInject> {
     LinuxWaylandInject::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wayflow_proto::{MouseButton, Modifiers};
+
+    #[test]
+    fn new_returns_ok() {
+        assert!(LinuxWaylandInject::new().is_ok());
+    }
+
+    #[test]
+    fn backend_fn_returns_ok() {
+        assert!(backend().is_ok());
+    }
+
+    #[test]
+    fn move_abs_returns_ok() {
+        let mut b = backend().unwrap();
+        assert!(b.move_abs(0, 0).is_ok());
+        assert!(b.move_abs(1920, 1080).is_ok());
+        assert!(b.move_abs(u16::MAX, u16::MAX).is_ok());
+    }
+
+    #[test]
+    fn mouse_button_returns_ok() {
+        let mut b = backend().unwrap();
+        for btn in [
+            MouseButton::Left,
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::Back,
+            MouseButton::Forward,
+            MouseButton::Other(9),
+        ] {
+            assert!(b.mouse_button(btn, true).is_ok());
+            assert!(b.mouse_button(btn, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn scroll_returns_ok() {
+        let mut b = backend().unwrap();
+        assert!(b.scroll(0, 0).is_ok());
+        assert!(b.scroll(120, -120).is_ok());
+        assert!(b.scroll(i16::MIN, i16::MAX).is_ok());
+    }
+
+    #[test]
+    fn key_event_returns_ok() {
+        let mut b = backend().unwrap();
+        assert!(b.key_event(0, false, Modifiers::default()).is_ok());
+        assert!(b.key_event(65, true, Modifiers { shift: true, ..Default::default() }).is_ok());
+        assert!(b.key_event(u32::MAX, true, Modifiers { shift: true, ctrl: true, alt: true, meta: true }).is_ok());
+    }
+}

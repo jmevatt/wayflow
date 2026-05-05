@@ -7,7 +7,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use wayflow_proto::{MouseButton, Modifiers};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     MouseMoveAbs { x: f64, y: f64 },
     MouseButton  { button: MouseButton, pressed: bool },
@@ -28,3 +28,23 @@ pub mod linux_wayland;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod rdev_backend;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_event_variants_are_debug_and_clone() {
+        let events = [
+            InputEvent::MouseMoveAbs { x: 1.0, y: 2.0 },
+            InputEvent::MouseButton { button: MouseButton::Left, pressed: true },
+            InputEvent::Scroll { dx: 0.5, dy: -1.5 },
+            InputEvent::Key { keycode: 65, pressed: false, modifiers: Modifiers::default() },
+        ];
+        for e in &events {
+            let cloned = e.clone();
+            assert_eq!(*e, cloned);
+            let _ = format!("{e:?}");
+        }
+    }
+}

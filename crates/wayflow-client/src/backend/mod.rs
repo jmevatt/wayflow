@@ -26,3 +26,20 @@ pub fn create() -> Result<Box<dyn InjectBackend>> {
 pub fn create() -> Result<Box<dyn InjectBackend>> {
     anyhow::bail!("no inject backend implemented for this platform yet")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn create_returns_ok_on_linux() {
+        assert!(create().is_ok());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn create_returns_err_on_non_linux() {
+        assert!(create().is_err());
+    }
+}

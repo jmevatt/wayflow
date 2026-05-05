@@ -18,6 +18,11 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 serde         = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+# test-util is not included in features = ["full"]; needed for time::pause / advance
+tokio = { workspace = true, features = ["test-util"] }
+
 # Linux: XDG portal for input capture (Wayland RemoteDesktop portal)
 # ashpd wraps zbus; works on both X11 and Wayland sessions.
 [target.'cfg(target_os = "linux")'.dependencies]

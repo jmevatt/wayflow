@@ -18,6 +18,9 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 serde         = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 # Linux/Wayland: libei (EIS protocol) for input injection
 # Linux/X11:    x11rb + XTest extension
 [target.'cfg(target_os = "linux")'.dependencies]

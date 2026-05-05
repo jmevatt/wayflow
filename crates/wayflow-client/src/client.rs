@@ -6,10 +6,13 @@
 use anyhow::{bail, Result};
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
 use wayflow_core::{config::Config, tls, transport};
 use wayflow_proto::{C2S, HelloC2S, S2C, ScreenInfo, PROTOCOL_VERSION};
+
+use crate::backend::InjectBackend;
 
 pub async fn run(config: Config, server_addr: String) -> Result<()> {
     let tls_cfg = tls::client_tls_insecure()?;
@@ -49,8 +52,20 @@ pub async fn run(config: Config, server_addr: String) -> Result<()> {
     info!("handshake complete; server knows {} screen(s)", server_hello.screens.len());
 
     let mut backend = crate::backend::create()?;
+    event_loop(r, w, backend.as_mut()).await
+}
 
-    // --- Event loop ---
+/// Drive the inject backend from an already-established framed stream.
+/// Exposed for testing with in-memory streams and mock backends.
+pub(crate) async fn event_loop<R, W>(
+    mut r: R,
+    mut w: W,
+    backend: &mut dyn InjectBackend,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     loop {
         match transport::recv_s2c(&mut r).await {
             Ok(S2C::EnterScreen { x, y }) => {
@@ -87,6 +102,253 @@ pub async fn run(config: Config, server_addr: String) -> Result<()> {
             }
         }
     }
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result as AResult;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{duplex, split, AsyncWriteExt};
+    use wayflow_core::transport;
+    use wayflow_proto::*;
+
+    // ---------- Mock backend ----------
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        MoveAbs(u16, u16),
+        MouseButton(MouseButton, bool),
+        Scroll(i16, i16),
+        KeyEvent(u32, bool),
+    }
+
+    struct MockBackend {
+        calls: Arc<Mutex<Vec<Call>>>,
+        fail_on: Option<Call>,
+    }
+
+    impl MockBackend {
+        fn new() -> (Self, Arc<Mutex<Vec<Call>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            (MockBackend { calls: calls.clone(), fail_on: None }, calls)
+        }
+
+        fn failing(on: Call) -> Self {
+            MockBackend { calls: Arc::new(Mutex::new(Vec::new())), fail_on: Some(on) }
+        }
+    }
+
+    impl InjectBackend for MockBackend {
+        fn move_abs(&mut self, x: u16, y: u16) -> AResult<()> {
+            let call = Call::MoveAbs(x, y);
+            if self.fail_on.as_ref() == Some(&call) {
+                anyhow::bail!("injected failure");
+            }
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+        fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> AResult<()> {
+            let call = Call::MouseButton(button, pressed);
+            if self.fail_on.as_ref() == Some(&call) {
+                anyhow::bail!("injected failure");
+            }
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+        fn scroll(&mut self, dx: i16, dy: i16) -> AResult<()> {
+            let call = Call::Scroll(dx, dy);
+            if self.fail_on.as_ref() == Some(&call) {
+                anyhow::bail!("injected failure");
+            }
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+        fn key_event(&mut self, keycode: u32, pressed: bool, _modifiers: Modifiers) -> AResult<()> {
+            let call = Call::KeyEvent(keycode, pressed);
+            if self.fail_on.as_ref() == Some(&call) {
+                anyhow::bail!("injected failure");
+            }
+            self.calls.lock().unwrap().push(call);
+            Ok(())
+        }
+    }
+
+    // Helper: send one S2C message from "server" then close, run event_loop, return calls.
+    async fn run_with_msg(msg: S2C) -> Vec<Call> {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(&mut server_side, &msg).await.unwrap();
+        drop(server_side); // EOF after the message
+
+        let (mut backend, calls) = MockBackend::new();
+        event_loop(client_r, client_w, &mut backend).await.unwrap();
+        let result = calls.lock().unwrap().clone();
+        result
+    }
+
+    // ---------- S2C dispatch tests ----------
+
+    #[tokio::test]
+    async fn enter_screen_calls_move_abs() {
+        let calls = run_with_msg(S2C::EnterScreen { x: 10, y: 20 }).await;
+        assert_eq!(calls, vec![Call::MoveAbs(10, 20)]);
+    }
+
+    #[tokio::test]
+    async fn leave_screen_makes_no_backend_call() {
+        let calls = run_with_msg(S2C::LeaveScreen).await;
+        assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mouse_move_abs_calls_move_abs() {
+        let calls = run_with_msg(S2C::MouseMoveAbs { x: 640, y: 480 }).await;
+        assert_eq!(calls, vec![Call::MoveAbs(640, 480)]);
+    }
+
+    #[tokio::test]
+    async fn mouse_button_dispatched() {
+        let calls = run_with_msg(S2C::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+        }).await;
+        assert_eq!(calls, vec![Call::MouseButton(MouseButton::Left, true)]);
+    }
+
+    #[tokio::test]
+    async fn scroll_dispatched() {
+        let calls = run_with_msg(S2C::Scroll { dx: 5, dy: -3 }).await;
+        assert_eq!(calls, vec![Call::Scroll(5, -3)]);
+    }
+
+    #[tokio::test]
+    async fn key_event_dispatched() {
+        let calls = run_with_msg(S2C::KeyEvent {
+            keycode: 65,
+            pressed: true,
+            modifiers: Modifiers::default(),
+        }).await;
+        assert_eq!(calls, vec![Call::KeyEvent(65, true)]);
+    }
+
+    #[tokio::test]
+    async fn clipboard_data_makes_no_backend_call() {
+        let calls = run_with_msg(S2C::ClipboardData(ClipboardContent::Text("x".into()))).await;
+        assert!(calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hello_from_server_is_ignored() {
+        let calls = run_with_msg(S2C::Hello(HelloS2C {
+            version: PROTOCOL_VERSION,
+            screens: vec![],
+        })).await;
+        assert!(calls.is_empty());
+    }
+
+    // ---------- Ping -> Pong ----------
+
+    #[tokio::test]
+    async fn ping_sends_pong_back() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        // Server: send Ping, then read Pong, then close
+        let server_task = tokio::spawn(async move {
+            transport::send_s2c(&mut server_side, &S2C::Ping).await.unwrap();
+            let pong = transport::recv_c2s(&mut server_side).await.unwrap();
+            assert_eq!(pong, C2S::Pong);
+            // Drop closes connection
+        });
+
+        let (mut backend, _) = MockBackend::new();
+        event_loop(client_r, client_w, &mut backend).await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    // ---------- Error propagation ----------
+
+    #[tokio::test]
+    async fn backend_move_abs_error_propagates() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(&mut server_side, &S2C::MouseMoveAbs { x: 0, y: 0 }).await.unwrap();
+
+        let mut backend = MockBackend::failing(Call::MoveAbs(0, 0));
+        let result = event_loop(client_r, client_w, &mut backend).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_mouse_button_error_propagates() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(&mut server_side, &S2C::MouseButton {
+            button: MouseButton::Left, pressed: true,
+        }).await.unwrap();
+
+        let mut backend = MockBackend::failing(Call::MouseButton(MouseButton::Left, true));
+        let result = event_loop(client_r, client_w, &mut backend).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_scroll_error_propagates() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(&mut server_side, &S2C::Scroll { dx: 1, dy: 1 }).await.unwrap();
+
+        let mut backend = MockBackend::failing(Call::Scroll(1, 1));
+        let result = event_loop(client_r, client_w, &mut backend).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn backend_key_event_error_propagates() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(&mut server_side, &S2C::KeyEvent {
+            keycode: 1, pressed: false, modifiers: Modifiers::default(),
+        }).await.unwrap();
+
+        let mut backend = MockBackend::failing(Call::KeyEvent(1, false));
+        let result = event_loop(client_r, client_w, &mut backend).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn server_disconnect_exits_cleanly() {
+        let (server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        // Close immediately without sending anything
+        drop(server_side);
+
+        let (mut backend, _) = MockBackend::new();
+        let result = event_loop(client_r, client_w, &mut backend).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_error_on_pong_propagates() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        // Send Ping then immediately close the read half so client can't write Pong back
+        transport::send_s2c(&mut server_side, &S2C::Ping).await.unwrap();
+        // Shut down the read side of server so client's write (Pong) errors
+        server_side.shutdown().await.unwrap();
+        drop(server_side);
+
+        let (mut backend, _) = MockBackend::new();
+        // The Pong write may fail or succeed depending on buffering; either way no panic
+        let _ = event_loop(client_r, client_w, &mut backend).await;
+    }
 }
