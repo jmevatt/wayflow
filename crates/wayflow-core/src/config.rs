@@ -1,17 +1,17 @@
 // Screen layout configuration.
 //
-// Screens are arranged in a 2D grid. The server occupies (0,0). Client screens
-// are placed relative to the server using cardinal edges.
-//
-// Example config (TOML):
-//
+// Server config (config.toml):
 //   [server]
 //   name = "helicon"
 //
 //   [[clients]]
-//   name    = "trantor"
-//   edge    = "Right"    # trantor is to the right of helicon
-//   offset  = 0          # vertical alignment offset in pixels
+//   name   = "trantor"
+//   edge   = "Right"
+//   offset = 0
+//
+// Client config (client.toml):
+//   server = "helicon"
+//   port   = 24800  # optional
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -73,6 +73,35 @@ impl Config {
         }
         std::fs::write(path, toml::to_string_pretty(self)?)?;
         Ok(())
+    }
+}
+
+/// Minimal client-side config: just the server address.
+/// Stored separately from the server config so clients don't need placement info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientConfig {
+    /// Server hostname or IP address.
+    pub server: String,
+    /// Server port. Default 24800.
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+impl ClientConfig {
+    pub fn default_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("wayflow")
+            .join("client.toml")
+    }
+
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        Ok(toml::from_str(&text)?)
+    }
+
+    pub fn server_addr(&self) -> String {
+        format!("{}:{}", self.server, self.port)
     }
 }
 

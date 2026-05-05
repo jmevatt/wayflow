@@ -5,12 +5,12 @@
 //   2. route_events:  translate InputEvents from the capture backend into
 //      S2C messages for the focused client, using edge detection.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::SystemTime};
 use anyhow::{bail, Result};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpListener,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, watch, RwLock},
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
@@ -29,7 +29,7 @@ type Clients = Arc<RwLock<HashMap<String, (ScreenInfo, mpsc::Sender<S2C>)>>>;
 
 const PING_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let (cert_path, key_path) = tls::default_cert_paths();
     let tls_cfg = tls::server_tls(&cert_path, &key_path)?;
     let rustls_cfg = rustls::ServerConfig::builder()
@@ -52,10 +52,12 @@ pub async fn run(config: Config) -> Result<()> {
     // The capture backend listens on release_rx and releases its compositor-level grab.
     let (release_tx, release_rx) = mpsc::channel::<()>(4);
 
+    let (config_tx, config_rx) = watch::channel(Arc::new(config.clone()));
+    tokio::spawn(watch_config(config_path, config_tx));
+
     let routing_clients = clients.clone();
-    let routing_config = Arc::new(config.clone());
     tokio::spawn(async move {
-        if let Err(e) = route_events(event_rx, routing_clients, routing_config, server_monitors, release_tx).await {
+        if let Err(e) = route_events(event_rx, routing_clients, config_rx, server_monitors, release_tx).await {
             warn!("route_events exited: {e:#}");
         }
     });
@@ -73,7 +75,7 @@ pub async fn run(config: Config) -> Result<()> {
 async fn route_events(
     mut rx: mpsc::Receiver<InputEvent>,
     clients: Clients,
-    config: Arc<Config>,
+    config_rx: watch::Receiver<Arc<Config>>,
     server_monitors: Vec<ScreenInfo>,
     release_tx: mpsc::Sender<()>,
 ) -> Result<()> {
@@ -90,7 +92,9 @@ async fn route_events(
 
                 if active_client.is_none() {
                     if let Some(edge) = layout.crossed_edge(sx, sy) {
-                        match config.clients.iter().find(|c| c.edge == edge) {
+                        // Clone the entry before any awaits so the watch borrow is dropped.
+                        let entry = config_rx.borrow().clients.iter().find(|c| c.edge == edge).cloned();
+                        match entry {
                             Some(entry) => {
                                 let map = clients.read().await;
                                 if let Some((screen, tx)) = map.get(&entry.name) {
@@ -307,6 +311,28 @@ where
     write_task.abort();
 
     Ok(())
+}
+
+async fn watch_config(path: PathBuf, tx: watch::Sender<Arc<Config>>) {
+    let mut last_modified: Option<SystemTime> = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if last_modified.map(|lm| lm != modified).unwrap_or(true) {
+            last_modified = Some(modified);
+            match wayflow_core::config::Config::load(&path) {
+                Ok(cfg) => {
+                    info!("config reloaded: {} client(s) configured", cfg.clients.len());
+                    let _ = tx.send(Arc::new(cfg));
+                }
+                Err(e) => warn!("config reload failed (keeping current): {e:#}"),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -551,13 +577,13 @@ mod tests {
 
     // --- route_events ---
 
-    fn routing_config() -> Arc<Config> {
-        Arc::new(Config {
+    fn routing_config() -> watch::Receiver<Arc<Config>> {
+        watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![
                 ClientEntry { name: "mac".into(), edge: Edge::Right, offset: 0 },
             ],
-        })
+        })).1
     }
 
     fn server_monitors() -> Vec<ScreenInfo> {
@@ -723,10 +749,10 @@ mod tests {
     async fn missing_client_in_config_no_enter() {
         // Config has no client for the Right edge -> cursor at edge but no EnterScreen
         let (clients, mut client_rx) = connected_clients();
-        let config = Arc::new(Config {
+        let config = watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
-        });
+        })).1;
         let (tx, rx) = mpsc::channel(16);
         let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
 
@@ -788,10 +814,10 @@ mod tests {
     async fn release_tx_fires_when_no_client_at_edge() {
         // Config has client at Left, cursor hits Right -> no client -> release fires
         let (clients, _client_rx) = connected_clients();
-        let config = Arc::new(Config {
+        let config = watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
-        });
+        })).1;
         let (event_tx, event_rx) = mpsc::channel(16);
         let (release_tx, mut release_rx) = mpsc::channel(4);
         let task = tokio::spawn(route_events(event_rx, clients, config, server_monitors(), release_tx));

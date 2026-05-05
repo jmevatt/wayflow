@@ -1,12 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
-use wayflow_core::config::Config;
+use wayflow_core::config::{ClientConfig, Config};
 
 #[derive(Parser)]
 #[command(name = "wayflow", about = "Wayland-native KVM-over-network")]
 struct Cli {
-    /// Config file path (default: platform config dir / wayflow / config.toml)
+    /// Config file path (server mode: config.toml; client mode: client.toml)
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 
@@ -20,9 +20,9 @@ enum Command {
     Server,
     /// Run as a client (receives keyboard + mouse from a server)
     Client {
-        /// Server host or IP address
+        /// Server host or IP address (overrides client config file)
         #[arg(long, short)]
-        server: String,
+        server: Option<String>,
         /// Server port
         #[arg(long, short, default_value_t = 24800)]
         port: u16,
@@ -42,27 +42,38 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config_path = cli
-        .config
-        .unwrap_or_else(Config::default_path);
-
-    let config = if config_path.exists() {
-        Config::load(&config_path)?
-    } else {
-        tracing::warn!("no config at {}; using defaults", config_path.display());
-        Config {
-            server: wayflow_core::config::ServerConfig {
-                name: hostname(),
-                port: 24800,
-            },
-            clients: vec![],
-        }
-    };
 
     match cli.command {
-        Command::Server => wayflow_server::server::run(config).await,
+        Command::Server => {
+            let config_path = cli.config.unwrap_or_else(Config::default_path);
+            let config = if config_path.exists() {
+                Config::load(&config_path)?
+            } else {
+                tracing::warn!("no config at {}; using defaults", config_path.display());
+                Config {
+                    server: wayflow_core::config::ServerConfig {
+                        name: hostname(),
+                        port: 24800,
+                    },
+                    clients: vec![],
+                }
+            };
+            wayflow_server::server::run(config, config_path).await
+        }
+
         Command::Client { server, port } => {
-            wayflow_client::client::run(config, format!("{server}:{port}")).await
+            let addr = if let Some(host) = server {
+                format!("{host}:{port}")
+            } else {
+                let path = cli.config.unwrap_or_else(ClientConfig::default_path);
+                ClientConfig::load(&path)
+                    .with_context(|| format!(
+                        "no --server given and could not load client config from {}",
+                        path.display()
+                    ))?
+                    .server_addr()
+            };
+            wayflow_client::client::run(addr, hostname()).await
         }
     }
 }

@@ -9,12 +9,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
-use wayflow_core::{config::Config, tls, transport};
+use wayflow_core::{tls, transport};
 use wayflow_proto::{C2S, HelloC2S, S2C, ScreenInfo, PROTOCOL_VERSION};
 
 use crate::backend::InjectBackend;
 
-pub async fn run(config: Config, server_addr: String) -> Result<()> {
+pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     let tls_cfg = tls::client_tls_insecure()?;
     let connector = TlsConnector::from(Arc::new(tls_cfg));
 
@@ -32,7 +32,7 @@ pub async fn run(config: Config, server_addr: String) -> Result<()> {
     // --- Handshake ---
     // Placeholder screen dimensions -- phase 2 queries the inject backend for the real size.
     let my_screen = ScreenInfo {
-        name: config.server.name.clone(),
+        name: own_name.clone(),
         x: 0,
         y: 0,
         width: 1920,
@@ -40,7 +40,7 @@ pub async fn run(config: Config, server_addr: String) -> Result<()> {
     };
     transport::send_c2s(&mut w, &C2S::Hello(HelloC2S {
         version: PROTOCOL_VERSION,
-        name: config.server.name.clone(),
+        name: own_name,
         screens: vec![my_screen],
     })).await?;
 

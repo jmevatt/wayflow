@@ -12,6 +12,8 @@
 
 use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream};
 
+use ashpd::desktop::input_capture::Region;
+
 use anyhow::{Context, Result};
 use ashpd::desktop::input_capture::{Barrier, BarrierID, Capabilities, InputCapture};
 use futures::StreamExt;
@@ -64,8 +66,9 @@ async fn capture_async(
         .context("zones response")?;
 
     let zone_set = zones.zone_set();
-    let barriers = build_barriers(zones.regions());
-    debug!("setting {} barriers across {} zone(s)", barriers.len(), zones.regions().len());
+    let regions: Vec<Region> = zones.regions().to_vec();
+    let barriers = build_barriers(&regions);
+    debug!("setting {} barriers across {} zone(s)", barriers.len(), regions.len());
 
     let barrier_resp = portal
         .set_pointer_barriers(&session, &barriers, zone_set)
@@ -138,8 +141,11 @@ async fn capture_async(
             Some(()) = release_rx.recv() => {
                 if let Some(state) = active.take() {
                     debug!("releasing capture activation_id={:?}", state.activation_id);
+                    // Nudge cursor 5px inside the monitor so it doesn't immediately
+                    // re-trigger the barrier it just came from.
+                    let release_pos = nudge_inside(state.cursor_pos, &regions);
                     portal
-                        .release(&session, state.activation_id, Some(state.cursor_pos))
+                        .release(&session, state.activation_id, Some(release_pos))
                         .await
                         .ok();
                 }
@@ -254,13 +260,35 @@ fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
     }
 }
 
-fn build_barriers(regions: &[ashpd::desktop::input_capture::Region]) -> Vec<Barrier> {
+fn nudge_inside(pos: (f64, f64), regions: &[Region]) -> (f64, f64) {
+    let (x, y) = pos;
+    let margin = 5.0_f64;
+    for r in regions {
+        let rx  = r.x_offset() as f64;
+        let ry  = r.y_offset() as f64;
+        let rx2 = rx + r.width()  as f64 - 1.0;
+        let ry2 = ry + r.height() as f64 - 1.0;
+        // Check if we're at a horizontal barrier (cursor y within region, x at edge)
+        if y >= ry && y <= ry2 {
+            if x <= rx  { return (rx  + margin, y); }
+            if x >= rx2 { return (rx2 - margin, y); }
+        }
+        // Check if we're at a vertical barrier (cursor x within region, y at edge)
+        if x >= rx && x <= rx2 {
+            if y <= ry  { return (x, ry  + margin); }
+            if y >= ry2 { return (x, ry2 - margin); }
+        }
+    }
+    pos
+}
+
+fn build_barriers(regions: &[Region]) -> Vec<Barrier> {
     let mut barriers = Vec::with_capacity(regions.len() * 4);
     let mut id: u32 = 1;
     for region in regions {
         let x  = region.x_offset();
         let y  = region.y_offset();
-        let x2 = x + region.width() as i32 - 1;
+        let x2 = x + region.width()  as i32 - 1;
         let y2 = y + region.height() as i32 - 1;
         let nz = |n: u32| -> BarrierID { NonZeroU32::new(n).unwrap() };
         barriers.push(Barrier::new(nz(id),     (x2, y,  x2, y2))); id += 1; // right
