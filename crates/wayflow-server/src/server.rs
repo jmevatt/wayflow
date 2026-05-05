@@ -48,18 +48,21 @@ pub async fn run(config: Config) -> Result<()> {
     }];
 
     let (event_tx, event_rx) = mpsc::channel::<InputEvent>(256);
+    // release_tx is signalled by route_events when cursor focus returns to the server.
+    // The capture backend listens on release_rx and releases its compositor-level grab.
+    let (release_tx, release_rx) = mpsc::channel::<()>(4);
 
     let routing_clients = clients.clone();
     let routing_config = Arc::new(config.clone());
     tokio::spawn(async move {
-        if let Err(e) = route_events(event_rx, routing_clients, routing_config, server_monitors).await {
+        if let Err(e) = route_events(event_rx, routing_clients, routing_config, server_monitors, release_tx).await {
             warn!("route_events exited: {e:#}");
         }
     });
 
     let event_tx_capture = event_tx.clone();
     std::thread::spawn(move || {
-        if let Err(e) = crate::backend::start_capture(event_tx_capture) {
+        if let Err(e) = crate::backend::start_capture(event_tx_capture, release_rx) {
             warn!("capture backend error: {e:#}");
         }
     });
@@ -72,6 +75,7 @@ async fn route_events(
     clients: Clients,
     config: Arc<Config>,
     server_monitors: Vec<ScreenInfo>,
+    release_tx: mpsc::Sender<()>,
 ) -> Result<()> {
     let layout = ServerLayout::new(server_monitors);
     let mut active_client: Option<String> = None;
@@ -86,14 +90,23 @@ async fn route_events(
 
                 if active_client.is_none() {
                     if let Some(edge) = layout.crossed_edge(sx, sy) {
-                        if let Some(entry) = config.clients.iter().find(|c| c.edge == edge) {
-                            let map = clients.read().await;
-                            if let Some((screen, tx)) = map.get(&entry.name) {
-                                let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
-                                let _ = tx.send(S2C::EnterScreen { x: cx, y: cy }).await;
-                                active_client = Some(entry.name.clone());
-                                client_cursor = (cx as i32, cy as i32);
-                                debug!("cursor -> {:?} at ({cx}, {cy})", entry.name);
+                        match config.clients.iter().find(|c| c.edge == edge) {
+                            Some(entry) => {
+                                let map = clients.read().await;
+                                if let Some((screen, tx)) = map.get(&entry.name) {
+                                    let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
+                                    let _ = tx.send(S2C::EnterScreen { x: cx, y: cy }).await;
+                                    active_client = Some(entry.name.clone());
+                                    client_cursor = (cx as i32, cy as i32);
+                                    debug!("cursor -> {:?} at ({cx}, {cy})", entry.name);
+                                } else {
+                                    // Client configured but not connected -- release immediately.
+                                    let _ = release_tx.try_send(());
+                                }
+                            }
+                            None => {
+                                // No client configured for this edge -- release immediately.
+                                let _ = release_tx.try_send(());
                             }
                         }
                     }
@@ -119,6 +132,7 @@ async fn route_events(
                             let _ = tx.send(S2C::LeaveScreen).await;
                             drop(map);
                             active_client = None;
+                            let _ = release_tx.try_send(());
                             debug!("cursor returned to server");
                         } else {
                             let _ = tx.send(S2C::MouseMoveAbs {
@@ -566,11 +580,17 @@ mod tests {
         out
     }
 
+    // Return a release_tx whose receiver is discarded (for tests that don't need release signals).
+    fn dummy_release() -> mpsc::Sender<()> {
+        let (tx, _rx) = mpsc::channel(4);
+        tx
+    }
+
     #[tokio::test]
     async fn edge_crossing_sends_enter_screen() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         // Right edge of 2560x1440 server at y=720
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -585,7 +605,7 @@ mod tests {
     async fn no_enter_when_cursor_not_at_edge() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         tx.send(InputEvent::MouseMoveAbs { x: 1000.0, y: 720.0 }).await.unwrap();
         drop(tx);
@@ -598,7 +618,7 @@ mod tests {
     async fn mouse_move_forwarded_while_on_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         // Enter client: cursor at right edge (2559, 720) -> EnterScreen { x: 0, y: 720 }
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -616,7 +636,7 @@ mod tests {
     async fn leave_screen_when_cursor_hits_client_left_edge() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         // Enter at right edge -> client cursor at (0, 720)
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -634,7 +654,7 @@ mod tests {
     async fn key_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::Key {
@@ -658,7 +678,7 @@ mod tests {
     async fn button_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::MouseButton { button: MouseButton::Left, pressed: true }).await.unwrap();
@@ -673,7 +693,7 @@ mod tests {
     async fn scroll_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::Scroll { dx: 3.0, dy: -2.0 }).await.unwrap();
@@ -688,7 +708,7 @@ mod tests {
     async fn events_not_forwarded_without_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
 
         tx.send(InputEvent::Key { keycode: 65, pressed: true, modifiers: Modifiers::default() }).await.unwrap();
         tx.send(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }).await.unwrap();
@@ -708,7 +728,7 @@ mod tests {
             clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
         });
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, config, server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         drop(tx);
@@ -722,7 +742,7 @@ mod tests {
         // Client is removed from map mid-session
         let (clients, _client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients.clone(), routing_config(), server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients.clone(), routing_config(), server_monitors(), dummy_release()));
 
         // Enter the client
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -739,9 +759,47 @@ mod tests {
         let clients = empty_clients();
         let config = routing_config();
         let (tx, rx) = mpsc::channel::<InputEvent>(16);
-        let task = tokio::spawn(route_events(rx, clients, config, server_monitors()));
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
 
         drop(tx);
         task.await.unwrap().unwrap();
+    }
+
+    // --- release signal on leave ---
+
+    #[tokio::test]
+    async fn release_tx_fires_when_cursor_leaves_client() {
+        let (clients, _client_rx) = connected_clients();
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (release_tx, mut release_rx) = mpsc::channel(4);
+        let task = tokio::spawn(route_events(event_rx, clients, routing_config(), server_monitors(), release_tx));
+
+        // Enter client
+        event_tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        // Leave (delta pushes client cursor to left edge)
+        event_tx.send(InputEvent::MouseMoveAbs { x: 2549.0, y: 720.0 }).await.unwrap();
+        drop(event_tx);
+        task.await.unwrap().unwrap();
+
+        assert!(release_rx.try_recv().is_ok(), "release_tx should have fired on LeaveScreen");
+    }
+
+    #[tokio::test]
+    async fn release_tx_fires_when_no_client_at_edge() {
+        // Config has client at Left, cursor hits Right -> no client -> release fires
+        let (clients, _client_rx) = connected_clients();
+        let config = Arc::new(Config {
+            server: ServerConfig { name: "server".into(), port: 24800 },
+            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
+        });
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (release_tx, mut release_rx) = mpsc::channel(4);
+        let task = tokio::spawn(route_events(event_rx, clients, config, server_monitors(), release_tx));
+
+        event_tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
+        drop(event_tx);
+        task.await.unwrap().unwrap();
+
+        assert!(release_rx.try_recv().is_ok(), "release_tx should fire when no client at edge");
     }
 }

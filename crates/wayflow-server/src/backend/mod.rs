@@ -2,6 +2,10 @@
 //
 // The backend captures keyboard/mouse events from the local compositor/OS
 // and sends them as InputEvent values over an async channel.
+//
+// `release_rx` receives a signal from the router when the cursor returns to the
+// server side, so the backend can release any compositor-level grab it holds
+// (e.g. InputCapture portal on Wayland).
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -16,9 +20,12 @@ pub enum InputEvent {
 }
 
 pub trait CaptureBackend: Send + 'static {
-    fn start(self, tx: mpsc::Sender<InputEvent>) -> Result<()>;
-    fn release_grab(&self) -> Result<()>;
-    fn acquire_grab(&self) -> Result<()>;
+    /// Start capturing input on the current thread (blocks until capture ends or errors).
+    /// Call from a dedicated `std::thread::spawn`.
+    ///
+    /// `release_rx` receives `()` each time the router returns cursor focus to the server.
+    /// Backends that hold a compositor-level input grab should release it on this signal.
+    fn start(self, tx: mpsc::Sender<InputEvent>, release_rx: mpsc::Receiver<()>) -> Result<()>;
 }
 
 // Platform dispatch -- each module exposes `pub fn backend() -> impl CaptureBackend`.
@@ -30,17 +37,17 @@ pub mod linux_wayland;
 pub mod rdev_backend;
 
 /// Start the platform capture backend on the current thread.
-/// This function blocks until the backend exits (or errors).
+/// Blocks until the backend exits or errors.
 /// Call from a dedicated `std::thread::spawn`.
-pub fn start_capture(tx: mpsc::Sender<InputEvent>) -> Result<()> {
+pub fn start_capture(tx: mpsc::Sender<InputEvent>, release_rx: mpsc::Receiver<()>) -> Result<()> {
     #[cfg(target_os = "linux")]
-    return linux_wayland::backend().start(tx);
+    return linux_wayland::backend().start(tx, release_rx);
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return rdev_backend::backend().start(tx);
+    return rdev_backend::backend().start(tx, release_rx);
 
     #[allow(unreachable_code)]
-    { let _ = tx; Err(anyhow::anyhow!("no capture backend for this platform")) }
+    { let _ = (tx, release_rx); Err(anyhow::anyhow!("no capture backend for this platform")) }
 }
 
 #[cfg(test)]

@@ -23,11 +23,13 @@ tempfile = { workspace = true }
 # test-util is not included in features = ["full"]; needed for time::pause / advance
 tokio = { workspace = true, features = ["test-util"] }
 
-# Linux: XDG portal for input capture (Wayland RemoteDesktop portal)
-# ashpd wraps zbus; works on both X11 and Wayland sessions.
+# Linux: XDG InputCapture portal + EI event stream via reis.
+# ashpd wraps zbus; reis is a pure-Rust libei/libeis implementation.
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = "0.10"
+ashpd        = "0.10"
 tokio-stream = "0.1"
+reis         = { version = "0.2", features = ["tokio"] }
+futures      = "0.3"
 
 # macOS + Windows: rdev for event tap / hooks
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
