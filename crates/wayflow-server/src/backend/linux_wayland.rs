@@ -15,7 +15,7 @@ use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream};
 use ashpd::desktop::input_capture::Region;
 
 use anyhow::{Context, Result};
-use ashpd::desktop::input_capture::{Barrier, BarrierID, Capabilities, InputCapture};
+use ashpd::desktop::input_capture::{Activated, ActivatedBarrier, Barrier, BarrierID, Capabilities, InputCapture};
 use futures::StreamExt;
 use reis::{
     ei,
@@ -85,7 +85,7 @@ async fn capture_async(
     debug!("zones: {:?}", screen_infos.iter().map(|s| format!("{}x{}+{}+{}", s.width, s.height, s.x, s.y)).collect::<Vec<_>>());
     let _ = monitors_tx.send(screen_infos);
 
-    let barriers = build_barriers(&regions);
+    let (barriers, barrier_dirs) = build_barriers(&regions);
     debug!("setting {} external barriers across {} zone(s)", barriers.len(), regions.len());
 
     let barrier_resp = portal
@@ -129,7 +129,8 @@ async fn capture_async(
             Some(evt) = activated_stream.next() => {
                 let pos = evt.cursor_position().unwrap_or((0.0, 0.0));
                 let activation_id = evt.activation_id();
-                debug!("capture activated id={activation_id:?} pos={pos:?}");
+                let nudge_dir = nudge_dir_for_activation(&evt, &barrier_dirs);
+                debug!("capture activated id={activation_id:?} pos={pos:?} nudge_dir={nudge_dir:?}");
 
                 let _ = tx.send(InputEvent::MouseMoveAbs {
                     x: pos.0 as f64,
@@ -139,6 +140,7 @@ async fn capture_async(
                 let pos_f64 = (pos.0 as f64, pos.1 as f64);
                 active = Some(ActivationState {
                     activation_id,
+                    nudge_dir,
                     activation_pos: pos_f64,
                     cursor_pos: pos_f64,
                 });
@@ -160,13 +162,16 @@ async fn capture_async(
 
             Some(()) = release_rx.recv() => {
                 if let Some(state) = active.take() {
-                    debug!("releasing capture activation_id={:?}", state.activation_id);
-                    // Return cursor to where it departed the server (the barrier hit
-                    // point), nudged 5px inside so it doesn't immediately re-trigger.
-                    // Using activation_pos rather than the accumulated cursor_pos
-                    // prevents over-travel on the client from placing the cursor at
-                    // the wrong edge of the server on return.
-                    let release_pos = nudge_inside(state.activation_pos, &regions);
+                    // Nudge 5px away from the barrier. Prefer the barrier_id-based
+                    // direction (exact axis) over position inference (nudge_inside),
+                    // which can leave the cursor at a second barrier when cursor_position
+                    // returns (0,0) due to the GNOME portal not filling the field.
+                    let release_pos = match state.nudge_dir {
+                        Some(dir) => nudge_by_dir(state.activation_pos, dir),
+                        None      => nudge_inside(state.activation_pos, &regions),
+                    };
+                    debug!("releasing id={:?} activation={:?} dir={:?} -> release={:?}",
+                        state.activation_id, state.activation_pos, state.nudge_dir, release_pos);
                     portal
                         .release(&session, state.activation_id, Some(release_pos))
                         .await
@@ -181,8 +186,15 @@ async fn capture_async(
     Ok(())
 }
 
+/// Which side of the desktop the triggered barrier is on.
+/// Used to nudge the cursor perpendicular to the barrier on release.
+#[derive(Clone, Copy, Debug)]
+enum NudgeDir { Left, Right, Top, Bottom }
+
 struct ActivationState {
     activation_id: Option<u32>,
+    /// Which barrier edge fired, if the compositor reported it.
+    nudge_dir: Option<NudgeDir>,
     /// Position where the cursor originally hit the barrier. Used for the
     /// portal release call so the cursor returns to the departure point
     /// rather than an over-traveled accumulated position.
@@ -288,26 +300,48 @@ fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
     }
 }
 
+/// Nudge the cursor 5px into the region it is closest to.
+/// Applies x and y corrections simultaneously so a corner position
+/// (e.g. at both the left and top barriers) does not end up at a second barrier.
 fn nudge_inside(pos: (f64, f64), regions: &[Region]) -> (f64, f64) {
-    let (x, y) = pos;
-    let margin = 5.0_f64;
+    const MARGIN: f64 = 5.0;
     for r in regions {
         let rx  = r.x_offset() as f64;
         let ry  = r.y_offset() as f64;
         let rx2 = rx + r.width()  as f64 - 1.0;
         let ry2 = ry + r.height() as f64 - 1.0;
-        // Check if we're at a horizontal barrier (cursor y within region, x at edge)
-        if y >= ry && y <= ry2 {
-            if x <= rx  { return (rx  + margin, y); }
-            if x >= rx2 { return (rx2 - margin, y); }
-        }
-        // Check if we're at a vertical barrier (cursor x within region, y at edge)
-        if x >= rx && x <= rx2 {
-            if y <= ry  { return (x, ry  + margin); }
-            if y >= ry2 { return (x, ry2 - margin); }
-        }
+        // Accept this region if pos is within MARGIN of its bounding box.
+        if pos.0 < rx - MARGIN || pos.0 > rx2 + MARGIN { continue; }
+        if pos.1 < ry - MARGIN || pos.1 > ry2 + MARGIN { continue; }
+        let (mut x, mut y) = pos;
+        if x <= rx  { x = rx  + MARGIN; }
+        if x >= rx2 { x = rx2 - MARGIN; }
+        if y <= ry  { y = ry  + MARGIN; }
+        if y >= ry2 { y = ry2 - MARGIN; }
+        return (x, y);
     }
     pos
+}
+
+/// Nudge the cursor 5px away from the barrier that triggered capture,
+/// using the known edge direction instead of guessing from position.
+fn nudge_by_dir(pos: (f64, f64), dir: NudgeDir) -> (f64, f64) {
+    const MARGIN: f64 = 5.0;
+    match dir {
+        NudgeDir::Left   => (pos.0 + MARGIN, pos.1),
+        NudgeDir::Right  => (pos.0 - MARGIN, pos.1),
+        NudgeDir::Top    => (pos.0, pos.1 + MARGIN),
+        NudgeDir::Bottom => (pos.0, pos.1 - MARGIN),
+    }
+}
+
+/// Resolve which barrier was triggered and return its NudgeDir, if the
+/// compositor provided the barrier_id in the Activated event.
+fn nudge_dir_for_activation(evt: &Activated, dir_map: &HashMap<u32, NudgeDir>) -> Option<NudgeDir> {
+    match evt.barrier_id()? {
+        ActivatedBarrier::Barrier(id) => dir_map.get(&id.get()).copied(),
+        ActivatedBarrier::UnknownBarrier => None,
+    }
 }
 
 /// Returns true if `region` has another region directly adjacent on its right edge
@@ -356,8 +390,9 @@ fn has_top_neighbor(regions: &[Region], r: &Region) -> bool {
     })
 }
 
-fn build_barriers(regions: &[Region]) -> Vec<Barrier> {
+fn build_barriers(regions: &[Region]) -> (Vec<Barrier>, HashMap<u32, NudgeDir>) {
     let mut barriers = Vec::with_capacity(regions.len() * 4);
+    let mut dir_map: HashMap<u32, NudgeDir> = HashMap::new();
     let mut id: u32 = 1;
     let nz = |n: u32| -> BarrierID { NonZeroU32::new(n).unwrap() };
     for region in regions {
@@ -367,12 +402,12 @@ fn build_barriers(regions: &[Region]) -> Vec<Barrier> {
         let y2 = y + region.height() as i32 - 1;
         // Only place a barrier on edges that are the outer boundary of the desktop.
         // Skip edges where an adjacent monitor forms an internal seam.
-        if !has_right_neighbor(regions, region)  { barriers.push(Barrier::new(nz(id), (x2, y,  x2, y2))); id += 1; }
-        if !has_left_neighbor(regions, region)   { barriers.push(Barrier::new(nz(id), (x,  y,  x,  y2))); id += 1; }
-        if !has_bottom_neighbor(regions, region) { barriers.push(Barrier::new(nz(id), (x,  y2, x2, y2))); id += 1; }
-        if !has_top_neighbor(regions, region)    { barriers.push(Barrier::new(nz(id), (x,  y,  x2, y)));  id += 1; }
+        if !has_right_neighbor(regions, region)  { barriers.push(Barrier::new(nz(id), (x2, y,  x2, y2))); dir_map.insert(id, NudgeDir::Right);  id += 1; }
+        if !has_left_neighbor(regions, region)   { barriers.push(Barrier::new(nz(id), (x,  y,  x,  y2))); dir_map.insert(id, NudgeDir::Left);   id += 1; }
+        if !has_bottom_neighbor(regions, region) { barriers.push(Barrier::new(nz(id), (x,  y2, x2, y2))); dir_map.insert(id, NudgeDir::Bottom); id += 1; }
+        if !has_top_neighbor(regions, region)    { barriers.push(Barrier::new(nz(id), (x,  y,  x2, y)));  dir_map.insert(id, NudgeDir::Top);    id += 1; }
     }
-    barriers
+    (barriers, dir_map)
 }
 
 #[cfg(test)]
@@ -418,7 +453,8 @@ mod tests {
 
     #[test]
     fn build_barriers_empty_regions() {
-        let barriers = build_barriers(&[]);
+        let (barriers, dir_map) = build_barriers(&[]);
         assert!(barriers.is_empty());
+        assert!(dir_map.is_empty());
     }
 }
