@@ -236,7 +236,7 @@ where
         bail!("version mismatch: client={} us={}", hello.version, PROTOCOL_VERSION);
     }
     if !config.clients.iter().any(|c| c.name == hello.name) {
-        warn!("unknown client {:?} from {peer} -- accepting anyway", hello.name);
+        bail!("unknown client {:?} from {peer} -- not in server config", hello.name);
     }
     info!("client {:?} connected from {peer}", hello.name);
 
@@ -247,6 +247,10 @@ where
             name: hello.name.clone(),
             x: 0, y: 0, width: 1920, height: 1080,
         });
+    if client_screen.width == 0 || client_screen.height == 0 {
+        bail!("client {:?} sent invalid screen dimensions ({}x{})",
+              hello.name, client_screen.width, client_screen.height);
+    }
 
     let server_screen = ScreenInfo {
         name: config.server.name.clone(),
@@ -348,6 +352,8 @@ mod tests {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![
                 ClientEntry { name: "known-client".into(), edge: Edge::Right, offset: 0 },
+                ClientEntry { name: "other-client".into(), edge: Edge::Left, offset: 0 },
+                ClientEntry { name: "c".into(), edge: Edge::Bottom, offset: 0 },
             ],
         })
     }
@@ -398,21 +404,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handshake_unknown_client_still_connects() {
+    async fn handshake_unknown_client_is_rejected() {
         let (server_side, client_side) = duplex(65536);
         let (sr, sw) = split(server_side);
-        let (mut cr, mut cw) = split(client_side);
+        let (mut _cr, mut cw) = split(client_side);
         let clients = empty_clients();
         let config = test_config();
 
         let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
 
-        let response = do_handshake(&mut cw, &mut cr, "unknown").await;
-        assert!(matches!(response, S2C::Hello(_)));
-
+        // Send Hello with a name not in the server config.
+        transport::send_c2s(&mut cw, &C2S::Hello(HelloC2S {
+            version: PROTOCOL_VERSION,
+            name: "unknown".into(),
+            screens: vec![],
+        })).await.unwrap();
         drop(cw);
-        drop(cr);
-        handle.await.unwrap().unwrap();
+
+        // Server should error (not connect successfully).
+        let result = handle.await.unwrap();
+        assert!(result.is_err(), "expected rejection of unknown client, got Ok");
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ use wayflow_proto::{C2S, HelloC2S, S2C, ScreenInfo, PROTOCOL_VERSION};
 use crate::backend::InjectBackend;
 
 pub async fn run(server_addr: String, own_name: String) -> Result<()> {
-    let tls_cfg = tls::client_tls_insecure()?;
+    let tls_cfg = tls::client_tls_tofu(&server_addr)?;
     let connector = TlsConnector::from(Arc::new(tls_cfg));
 
     let tcp = tokio::net::TcpStream::connect(&server_addr).await?;
@@ -97,7 +97,7 @@ where
                 debug!("ping");
                 transport::send_c2s(&mut w, &C2S::Pong).await?;
             }
-            Ok(S2C::Hello(_)) => {}
+            Ok(S2C::Hello(_)) => bail!("unexpected second Hello from server -- protocol error"),
             Err(e) => {
                 info!("server disconnected: {e}");
                 break;
@@ -243,12 +243,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hello_from_server_is_ignored() {
-        let calls = run_with_msg(S2C::Hello(HelloS2C {
+    async fn hello_from_server_errors() {
+        // A second Hello mid-session is a protocol error and should abort the loop.
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+        let (backend, backend_arc) = MockBackend::new();
+
+        let mut backend = backend;
+        let task = tokio::spawn(async move { event_loop(client_r, client_w, &mut backend).await });
+        transport::send_s2c(&mut server_side, &S2C::Hello(HelloS2C {
             version: PROTOCOL_VERSION,
             screens: vec![],
-        })).await;
-        assert!(calls.is_empty());
+        })).await.unwrap();
+        let result = task.await.unwrap();
+        assert!(result.is_err(), "expected error on second Hello, got Ok");
+        assert!(backend_arc.lock().unwrap().is_empty());
     }
 
     // ---------- Ping -> Pong ----------
