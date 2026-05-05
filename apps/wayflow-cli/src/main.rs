@@ -68,9 +68,21 @@ async fn main() -> Result<()> {
 }
 
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| {
-            std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_string())
-        })
-        .unwrap_or_else(|_| "wayflow".to_string())
+    // HOSTNAME env var (set by most Linux shells)
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() { return h; }
+    }
+    // gethostname(2) -- works on Linux and macOS
+    let mut buf = [0u8; 256];
+    let ok = unsafe {
+        libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
+    };
+    if ok == 0 {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        if let Ok(s) = std::str::from_utf8(&buf[..end]) {
+            let s = s.trim().to_string();
+            if !s.is_empty() { return s; }
+        }
+    }
+    "wayflow".to_string()
 }
