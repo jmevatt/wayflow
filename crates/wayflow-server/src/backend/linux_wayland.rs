@@ -118,9 +118,11 @@ async fn capture_async(
                     y: pos.1 as f64,
                 }).await;
 
+                let pos_f64 = (pos.0 as f64, pos.1 as f64);
                 active = Some(ActivationState {
                     activation_id,
-                    cursor_pos: (pos.0 as f64, pos.1 as f64),
+                    activation_pos: pos_f64,
+                    cursor_pos: pos_f64,
                 });
             }
 
@@ -141,9 +143,12 @@ async fn capture_async(
             Some(()) = release_rx.recv() => {
                 if let Some(state) = active.take() {
                     debug!("releasing capture activation_id={:?}", state.activation_id);
-                    // Nudge cursor 5px inside the monitor so it doesn't immediately
-                    // re-trigger the barrier it just came from.
-                    let release_pos = nudge_inside(state.cursor_pos, &regions);
+                    // Return cursor to where it departed the server (the barrier hit
+                    // point), nudged 5px inside so it doesn't immediately re-trigger.
+                    // Using activation_pos rather than the accumulated cursor_pos
+                    // prevents over-travel on the client from placing the cursor at
+                    // the wrong edge of the server on return.
+                    let release_pos = nudge_inside(state.activation_pos, &regions);
                     portal
                         .release(&session, state.activation_id, Some(release_pos))
                         .await
@@ -160,6 +165,11 @@ async fn capture_async(
 
 struct ActivationState {
     activation_id: Option<u32>,
+    /// Position where the cursor originally hit the barrier. Used for the
+    /// portal release call so the cursor returns to the departure point
+    /// rather than an over-traveled accumulated position.
+    activation_pos: (f64, f64),
+    /// Running absolute position, updated by EI PointerMotion deltas.
     cursor_pos: (f64, f64),
 }
 
