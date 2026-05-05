@@ -15,7 +15,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 use wayflow_core::{
-    config::Config,
+    config::{Config, Edge},
     layout::{ServerLayout, map_to_client},
     tls,
     transport,
@@ -81,6 +81,7 @@ async fn route_events(
 ) -> Result<()> {
     let mut layout = ServerLayout::new(monitors_rx.borrow().clone());
     let mut active_client: Option<String> = None;
+    let mut active_edge: Option<Edge> = None;
     let mut server_cursor = (0i32, 0i32);
     let mut client_cursor = (0i32, 0i32);
 
@@ -106,6 +107,7 @@ async fn route_events(
                                     let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
                                     let _ = tx.send(S2C::EnterScreen { x: cx, y: cy }).await;
                                     active_client = Some(entry.name.clone());
+                                    active_edge = Some(entry.edge);
                                     client_cursor = (cx as i32, cy as i32);
                                     debug!("cursor -> {:?} at ({cx}, {cy})", entry.name);
                                 } else {
@@ -132,15 +134,20 @@ async fn route_events(
                         let new_cy = (client_cursor.1 + dy).clamp(0, screen.height as i32 - 1);
                         client_cursor = (new_cx, new_cy);
 
-                        let at_edge = new_cx == 0
-                            || new_cx == screen.width as i32 - 1
-                            || new_cy == 0
-                            || new_cy == screen.height as i32 - 1;
+                        // Only the edge facing back toward the server triggers a return.
+                        // Other client edges clamp the cursor (normal screen boundary).
+                        let at_return_edge = match active_edge.unwrap() {
+                            Edge::Left   => new_cx == screen.width  as i32 - 1,
+                            Edge::Right  => new_cx == 0,
+                            Edge::Top    => new_cy == screen.height as i32 - 1,
+                            Edge::Bottom => new_cy == 0,
+                        };
 
-                        if at_edge {
+                        if at_return_edge {
                             let _ = tx.send(S2C::LeaveScreen).await;
                             drop(map);
                             active_client = None;
+                            active_edge = None;
                             let _ = release_tx.try_send(());
                             debug!("cursor returned to server");
                         } else {
@@ -151,6 +158,7 @@ async fn route_events(
                         }
                     } else {
                         active_client = None;
+                        active_edge = None;
                     }
                 }
             }
