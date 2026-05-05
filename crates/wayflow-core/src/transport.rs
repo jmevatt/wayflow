@@ -73,7 +73,7 @@ mod tests {
         let (mut a, mut b) = duplex(4096);
         let msg = S2C::Hello(HelloS2C {
             version: PROTOCOL_VERSION,
-            screens: vec![ScreenInfo { name: "srv".into(), width: 1920, height: 1080 }],
+            screens: vec![ScreenInfo { name: "srv".into(), x: 0, y: 0, width: 1920, height: 1080 }],
         });
         send_s2c(&mut a, &msg).await.unwrap();
         assert_eq!(recv_s2c(&mut b).await.unwrap(), msg);
@@ -153,7 +153,7 @@ mod tests {
         let msg = C2S::Hello(HelloC2S {
             version: PROTOCOL_VERSION,
             name: "helicon".into(),
-            screens: vec![ScreenInfo { name: "helicon".into(), width: 2560, height: 1440 }],
+            screens: vec![ScreenInfo { name: "helicon".into(), x: 0, y: 0, width: 2560, height: 1440 }],
         });
         send_c2s(&mut a, &msg).await.unwrap();
         assert_eq!(recv_c2s(&mut b).await.unwrap(), msg);

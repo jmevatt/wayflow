@@ -96,6 +96,8 @@ where
     // Placeholder server screen -- replaced in phase 2 by the capture backend.
     let server_screen = ScreenInfo {
         name: config.server.name.clone(),
+        x: 0,
+        y: 0,
         width: 1920,
         height: 1080,
     };
@@ -195,7 +197,7 @@ mod tests {
         transport::send_c2s(client_w, &C2S::Hello(HelloC2S {
             version: PROTOCOL_VERSION,
             name: name.into(),
-            screens: vec![ScreenInfo { name: name.into(), width: 1920, height: 1080 }],
+            screens: vec![ScreenInfo { name: name.into(), x: 0, y: 0, width: 1920, height: 1080 }],
         })).await.unwrap();
         transport::recv_s2c(client_r).await.unwrap()
     }

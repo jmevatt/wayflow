@@ -33,6 +33,8 @@ pub async fn run(config: Config, server_addr: String) -> Result<()> {
     // Placeholder screen dimensions -- phase 2 queries the inject backend for the real size.
     let my_screen = ScreenInfo {
         name: config.server.name.clone(),
+        x: 0,
+        y: 0,
         width: 1920,
         height: 1080,
     };

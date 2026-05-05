@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -18,6 +18,9 @@ pub const PROTOCOL_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenInfo {
     pub name: String,
+    /// Position of this monitor's top-left corner in the virtual desktop.
+    pub x: i32,
+    pub y: i32,
     pub width: u16,
     pub height: u16,
 }
@@ -116,8 +119,34 @@ mod tests {
 
     #[test]
     fn screen_info() {
-        rt(&ScreenInfo { name: "monitor-1".into(), width: 1920, height: 1080 });
-        rt(&ScreenInfo { name: "".into(), width: 0, height: 0 });
+        rt(&ScreenInfo { name: "monitor-1".into(), x: 0, y: 0, width: 1920, height: 1080 });
+        rt(&ScreenInfo { name: "".into(), x: 0, y: 0, width: 0, height: 0 });
+    }
+
+    #[test]
+    fn screen_info_with_position() {
+        rt(&ScreenInfo { name: "DP-2".into(), x: 2560, y: 0, width: 1920, height: 1080 });
+        rt(&ScreenInfo { name: "below".into(), x: 0, y: 1440, width: 2560, height: 1440 });
+    }
+
+    #[test]
+    fn screen_info_negative_position() {
+        // Monitor to the left or above the origin is valid.
+        rt(&ScreenInfo { name: "left".into(), x: -1920, y: 0, width: 1920, height: 1080 });
+        rt(&ScreenInfo { name: "above".into(), x: 0, y: -1440, width: 2560, height: 1440 });
+    }
+
+    #[test]
+    fn multi_monitor_hello() {
+        // Dual monitor server: DP-1 at origin, DP-2 to the right.
+        rt(&HelloS2C {
+            version: PROTOCOL_VERSION,
+            screens: alloc::vec![
+                ScreenInfo { name: "DP-1".into(), x: 0,    y: 0, width: 2560, height: 1440 },
+                ScreenInfo { name: "DP-2".into(), x: 2560, y: 0, width: 1920, height: 1080 },
+                ScreenInfo { name: "mac".into(),  x: 0,    y: 0, width: 2560, height: 1600 },
+            ],
+        });
     }
 
     #[test]
@@ -153,8 +182,8 @@ mod tests {
         rt(&HelloS2C {
             version: PROTOCOL_VERSION,
             screens: alloc::vec![
-                ScreenInfo { name: "server".into(), width: 2560, height: 1440 },
-                ScreenInfo { name: "client".into(), width: 1920, height: 1080 },
+                ScreenInfo { name: "server".into(), x: 0, y: 0, width: 2560, height: 1440 },
+                ScreenInfo { name: "client".into(), x: 0, y: 0, width: 1920, height: 1080 },
             ],
         });
         rt(&HelloS2C { version: 0, screens: alloc::vec![] });
@@ -165,7 +194,7 @@ mod tests {
         rt(&HelloC2S {
             version: PROTOCOL_VERSION,
             name: "helicon".into(),
-            screens: alloc::vec![ScreenInfo { name: "helicon".into(), width: 3840, height: 2160 }],
+            screens: alloc::vec![ScreenInfo { name: "helicon".into(), x: 0, y: 0, width: 3840, height: 2160 }],
         });
         rt(&HelloC2S { version: 0, name: "".into(), screens: alloc::vec![] });
     }
