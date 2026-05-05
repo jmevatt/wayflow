@@ -16,6 +16,23 @@ pub struct ServerTlsConfig {
     pub key: PrivateKeyDer<'static>,
 }
 
+/// Install the ring crypto provider as the process default.
+/// Call once at startup before any rustls usage.
+pub fn install_default_crypto_provider() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok(); // already installed is fine
+}
+
+/// Default paths for the server's self-signed cert and private key.
+pub fn default_cert_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("wayflow")
+        .join("certs");
+    (dir.join("server.crt"), dir.join("server.key"))
+}
+
 /// Load or generate a self-signed cert + key pair.
 pub fn server_tls(cert_path: &Path, key_path: &Path) -> Result<ServerTlsConfig> {
     if cert_path.exists() && key_path.exists() {

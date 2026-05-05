@@ -31,6 +31,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Must be called before any rustls usage.
+    wayflow_core::tls::install_default_crypto_provider();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_env("WAYFLOW_LOG"))
         .init();

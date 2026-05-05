@@ -15,3 +15,14 @@ pub mod linux_wayland;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod rdev_backend;
+
+/// Create the platform-appropriate injection backend.
+#[cfg(target_os = "linux")]
+pub fn create() -> Result<Box<dyn InjectBackend>> {
+    Ok(Box::new(linux_wayland::backend()?))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn create() -> Result<Box<dyn InjectBackend>> {
+    anyhow::bail!("no inject backend implemented for this platform yet")
+}
