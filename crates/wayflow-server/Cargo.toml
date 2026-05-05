@@ -1,0 +1,29 @@
+[package]
+name    = "wayflow-server"
+description = "Input capture backends + server connection loop"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[dependencies]
+wayflow-proto = { workspace = true }
+wayflow-core  = { workspace = true }
+tokio         = { workspace = true }
+tokio-rustls  = { workspace = true }
+rustls        = { workspace = true }
+anyhow        = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+serde         = { workspace = true }
+
+# Linux: XDG portal for input capture (Wayland RemoteDesktop portal)
+# ashpd wraps zbus; works on both X11 and Wayland sessions.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = "0.10"
+tokio-stream = "0.1"
+
+# macOS + Windows: rdev for event tap / hooks
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+rdev = "0.5"

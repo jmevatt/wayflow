@@ -1,0 +1,12 @@
+[package]
+name    = "wayflow-proto"
+description = "Wire types for the Wayflow protocol -- no I/O, no platform deps"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+authors.workspace   = true
+repository.workspace = true
+
+[dependencies]
+postcard = { workspace = true }
+serde    = { workspace = true }

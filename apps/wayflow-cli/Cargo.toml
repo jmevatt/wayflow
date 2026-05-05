@@ -1,0 +1,25 @@
+[package]
+name    = "wayflow-cli"
+description = "CLI entry point -- run as server or client"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+authors.workspace    = true
+repository.workspace = true
+
+[[bin]]
+name = "wayflow"
+path = "src/main.rs"
+
+[dependencies]
+wayflow-core   = { workspace = true }
+wayflow-server = { workspace = true }
+wayflow-client = { workspace = true }
+
+tokio   = { workspace = true }
+anyhow  = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
