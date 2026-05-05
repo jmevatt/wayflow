@@ -6,16 +6,25 @@ use rdev::{Button, EventType, simulate};
 use wayflow_core::keymap::rdev_keys;
 use wayflow_proto::{Modifiers, MouseButton};
 
-pub struct RdevInject;
+pub struct RdevInject {
+    left_down: bool,
+    right_down: bool,
+}
 
 impl RdevInject {
     pub fn new() -> Result<Self> {
-        Ok(Self {})
+        Ok(Self { left_down: false, right_down: false })
     }
 }
 
 fn sim(event: &EventType) -> Result<()> {
-    simulate(event).map_err(|e| anyhow::anyhow!("rdev simulate: {:?}", e))
+    // Don't propagate simulation errors -- rdev returns SimulateError for
+    // unsupported events (e.g. Middle/Back/Forward buttons on macOS) and we
+    // must not crash the client connection over an injected event that failed.
+    if simulate(event).is_err() {
+        tracing::warn!("rdev simulate failed (event may be unsupported on this platform)");
+    }
+    Ok(())
 }
 
 fn map_button(button: MouseButton) -> Button {
@@ -31,10 +40,22 @@ fn map_button(button: MouseButton) -> Button {
 
 impl InjectBackend for RdevInject {
     fn move_abs(&mut self, x: u16, y: u16) -> Result<()> {
+        // On macOS, the Window Server tracks window drags via kCGEventLeftMouseDragged,
+        // not kCGEventMouseMoved. rdev always emits MouseMoved, so we bypass it when
+        // a button is held and post the drag event type directly via core-graphics.
+        #[cfg(target_os = "macos")]
+        return move_abs_macos(x as f64, y as f64, self.left_down, self.right_down);
+
+        #[cfg(not(target_os = "macos"))]
         sim(&EventType::MouseMove { x: x as f64, y: y as f64 })
     }
 
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()> {
+        match button {
+            MouseButton::Left  => self.left_down  = pressed,
+            MouseButton::Right => self.right_down = pressed,
+            _ => {}
+        }
         let btn = map_button(button);
         if pressed {
             sim(&EventType::ButtonPress(btn))
@@ -61,6 +82,30 @@ impl InjectBackend for RdevInject {
             sim(&EventType::KeyRelease(key))
         }
     }
+}
+
+/// Post a mouse move (or drag) CGEvent with the correct event type for the current button state.
+#[cfg(target_os = "macos")]
+fn move_abs_macos(x: f64, y: f64, left_down: bool, right_down: bool) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
+
+    let point = CGPoint { x, y };
+    let (etype, btn) = if left_down {
+        (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+    } else if right_down {
+        (CGEventType::RightMouseDragged, CGMouseButton::Right)
+    } else {
+        (CGEventType::MouseMoved, CGMouseButton::Left)
+    };
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
+    let event = CGEvent::new_mouse_event(source, etype, point, btn)
+        .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event failed"))?;
+    event.post(CGEventTapLocation::HID);
+    Ok(())
 }
 
 pub fn backend() -> Result<RdevInject> {
@@ -99,6 +144,15 @@ mod tests {
         assert!(b.key_event(0x00, true, Modifiers::default()).is_ok());
         assert!(b.key_event(0xA0, false, Modifiers::default()).is_ok());
         assert!(b.key_event(u32::MAX, true, Modifiers::default()).is_ok());
+    }
+
+    #[test]
+    fn button_state_tracks_left_down() {
+        let mut b = RdevInject { left_down: false, right_down: false };
+        b.left_down = true;
+        assert!(b.left_down);
+        b.left_down = false;
+        assert!(!b.left_down);
     }
 
     // The tests below call rdev::simulate -- they require a display server

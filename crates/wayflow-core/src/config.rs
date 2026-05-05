@@ -14,6 +14,7 @@
 //   port   = 24800  # optional
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,40 @@ pub struct ClientEntry {
     /// Pixel offset along the perpendicular axis (e.g. vertical offset for Left/Right edges).
     #[serde(default)]
     pub offset: i32,
+    /// Modifier key remap applied when forwarding keyboard events to this client.
+    /// Keys and values are modifier names: ctrl_left, ctrl_right, shift_left, shift_right,
+    /// alt, alt_gr, meta_left, meta_right.
+    /// Example: { ctrl_left = "meta_left", meta_left = "ctrl_left" }
+    #[serde(default)]
+    pub modifier_map: HashMap<String, String>,
+}
+
+/// Map a modifier key name to its USB HID usage code (page 0x07).
+pub fn modifier_name_to_hid(name: &str) -> Option<u32> {
+    match name {
+        "ctrl_left"   => Some(0xE0),
+        "shift_left"  => Some(0xE1),
+        "alt"         => Some(0xE2),
+        "meta_left"   => Some(0xE3),
+        "ctrl_right"  => Some(0xE4),
+        "shift_right" => Some(0xE5),
+        "alt_gr"      => Some(0xE6),
+        "meta_right"  => Some(0xE7),
+        _ => None,
+    }
+}
+
+/// Apply a client's modifier_map to a HID keycode.
+/// Returns the remapped code, or the original if it has no mapping.
+pub fn remap_modifier_key(map: &HashMap<String, String>, hid: u32) -> u32 {
+    for (from_name, to_name) in map {
+        if modifier_name_to_hid(from_name) == Some(hid) {
+            if let Some(to) = modifier_name_to_hid(to_name) {
+                return to;
+            }
+        }
+    }
+    hid
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +160,7 @@ mod tests {
     fn all_edge_variants_roundtrip_in_client_entry() {
         // TOML can't serialize a bare enum at top level; test via ClientEntry.
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            let entry = ClientEntry { name: "test".into(), edge, offset: 0 };
+            let entry = ClientEntry { name: "test".into(), edge, offset: 0, modifier_map: Default::default() };
             let s = toml::to_string(&entry).unwrap();
             let back: ClientEntry = toml::from_str(&s).unwrap();
             assert_eq!(back.edge, edge, "failed for {edge:?}");
@@ -140,8 +175,8 @@ mod tests {
         let original = Config {
             server: ServerConfig { name: "helicon".into(), port: 24800 },
             clients: vec![
-                ClientEntry { name: "trantor".into(), edge: Edge::Right, offset: 0 },
-                ClientEntry { name: "other".into(), edge: Edge::Bottom, offset: -50 },
+                ClientEntry { name: "trantor".into(), edge: Edge::Right, offset: 0, modifier_map: Default::default() },
+                ClientEntry { name: "other".into(), edge: Edge::Bottom, offset: -50, modifier_map: Default::default() },
             ],
         };
         original.save(&path).unwrap();
@@ -187,5 +222,52 @@ name = "minimal"
     fn config_load_nonexistent_file_errors() {
         let result = Config::load(std::path::Path::new("/nonexistent/path/config.toml"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn modifier_name_to_hid_known() {
+        assert_eq!(modifier_name_to_hid("ctrl_left"),  Some(0xE0));
+        assert_eq!(modifier_name_to_hid("shift_left"), Some(0xE1));
+        assert_eq!(modifier_name_to_hid("alt"),        Some(0xE2));
+        assert_eq!(modifier_name_to_hid("meta_left"),  Some(0xE3));
+        assert_eq!(modifier_name_to_hid("ctrl_right"), Some(0xE4));
+        assert_eq!(modifier_name_to_hid("meta_right"), Some(0xE7));
+        assert_eq!(modifier_name_to_hid("bogus"),      None);
+    }
+
+    #[test]
+    fn remap_modifier_key_swaps_ctrl_meta() {
+        let map: HashMap<String, String> = [
+            ("ctrl_left".into(),  "meta_left".into()),
+            ("meta_left".into(),  "ctrl_left".into()),
+            ("ctrl_right".into(), "meta_right".into()),
+            ("meta_right".into(), "ctrl_right".into()),
+        ].into();
+
+        assert_eq!(remap_modifier_key(&map, 0xE0), 0xE3); // ctrl_left -> meta_left
+        assert_eq!(remap_modifier_key(&map, 0xE3), 0xE0); // meta_left -> ctrl_left
+        assert_eq!(remap_modifier_key(&map, 0xE4), 0xE7); // ctrl_right -> meta_right
+        assert_eq!(remap_modifier_key(&map, 0xE7), 0xE4); // meta_right -> ctrl_right
+        assert_eq!(remap_modifier_key(&map, 0xE1), 0xE1); // shift_left unchanged
+        assert_eq!(remap_modifier_key(&map, 0x04), 0x04); // key A unchanged
+    }
+
+    #[test]
+    fn remap_modifier_key_empty_map_passthrough() {
+        let map: HashMap<String, String> = HashMap::new();
+        assert_eq!(remap_modifier_key(&map, 0xE0), 0xE0);
+        assert_eq!(remap_modifier_key(&map, 0x04), 0x04);
+    }
+
+    #[test]
+    fn modifier_map_parses_from_toml() {
+        let toml = r#"
+name = "macbook"
+edge = "Right"
+modifier_map = { ctrl_left = "meta_left", meta_left = "ctrl_left" }
+"#;
+        let entry: ClientEntry = toml::from_str(toml).unwrap();
+        assert_eq!(remap_modifier_key(&entry.modifier_map, 0xE0), 0xE3);
+        assert_eq!(remap_modifier_key(&entry.modifier_map, 0xE3), 0xE0);
     }
 }

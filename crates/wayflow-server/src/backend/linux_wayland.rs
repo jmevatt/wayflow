@@ -123,6 +123,7 @@ async fn capture_async(
 
     let mut active: Option<ActivationState> = None;
     let mut modifiers = Modifiers::default();
+    let mut scroll_remainder = (0.0_f64, 0.0_f64);
 
     loop {
         tokio::select! {
@@ -155,7 +156,7 @@ async fn capture_async(
                 match ei_result {
                     Err(e) => { warn!("EI stream error: {e:?}"); break; }
                     Ok(event) => {
-                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers).await;
+                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut scroll_remainder).await;
                     }
                 }
             }
@@ -209,6 +210,7 @@ async fn handle_ei_event(
     context: &ei::Context,
     active: &mut Option<ActivationState>,
     modifiers: &mut Modifiers,
+    scroll_remainder: &mut (f64, f64),
 ) {
     match event {
         EiEvent::SeatAdded(evt) => {
@@ -241,10 +243,27 @@ async fn handle_ei_event(
         }
 
         EiEvent::ScrollDelta(evt) if active.is_some() => {
-            let _ = tx.send(InputEvent::Scroll {
-                dx: evt.dx as f64,
-                dy: evt.dy as f64,
-            }).await;
+            // EI uses opposite scroll direction from Wayland/rdev conventions -- negate.
+            // 10 pixels = 1 scroll click (mutter/gtk historical constant from deskflow).
+            // Accumulate sub-pixel remainder so touchpad high-res events don't get lost.
+            const PIXELS_PER_CLICK: f64 = 10.0;
+            scroll_remainder.0 += -(evt.dx as f64) / PIXELS_PER_CLICK;
+            scroll_remainder.1 += -(evt.dy as f64) / PIXELS_PER_CLICK;
+            let ix = scroll_remainder.0.trunc();
+            let iy = scroll_remainder.1.trunc();
+            scroll_remainder.0 -= ix;
+            scroll_remainder.1 -= iy;
+            if ix != 0.0 || iy != 0.0 {
+                let _ = tx.send(InputEvent::Scroll { dx: ix, dy: iy }).await;
+            }
+        }
+
+        EiEvent::ScrollDiscrete(evt) if active.is_some() => {
+            // discrete units are in 120ths of a scroll click (USB HID standard).
+            // Negate because EI direction is opposite to rdev/CGEvent conventions.
+            let dx = -(evt.discrete_dx as f64) / 120.0;
+            let dy = -(evt.discrete_dy as f64) / 120.0;
+            let _ = tx.send(InputEvent::Scroll { dx, dy }).await;
         }
 
         EiEvent::KeyboardKey(evt) if active.is_some() => {

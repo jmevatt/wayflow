@@ -15,7 +15,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 use wayflow_core::{
-    config::{Config, Edge},
+    config::{Config, Edge, remap_modifier_key},
     layout::{ServerLayout, map_to_client},
     tls,
     transport,
@@ -185,7 +185,11 @@ async fn route_events(
                 if let Some(ref name) = active_client {
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
-                        let _ = tx.send(S2C::KeyEvent { keycode, pressed, modifiers }).await;
+                        let remapped = config_rx.borrow().clients.iter()
+                            .find(|c| c.name == *name)
+                            .map(|c| remap_modifier_key(&c.modifier_map, keycode))
+                            .unwrap_or(keycode);
+                        let _ = tx.send(S2C::KeyEvent { keycode: remapped, pressed, modifiers }).await;
                     }
                 }
             }
@@ -364,9 +368,9 @@ mod tests {
         Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![
-                ClientEntry { name: "known-client".into(), edge: Edge::Right, offset: 0 },
-                ClientEntry { name: "other-client".into(), edge: Edge::Left, offset: 0 },
-                ClientEntry { name: "c".into(), edge: Edge::Bottom, offset: 0 },
+                ClientEntry { name: "known-client".into(), edge: Edge::Right, offset: 0, modifier_map: Default::default() },
+                ClientEntry { name: "other-client".into(), edge: Edge::Left, offset: 0, modifier_map: Default::default() },
+                ClientEntry { name: "c".into(), edge: Edge::Bottom, offset: 0, modifier_map: Default::default() },
             ],
         })
     }
@@ -605,7 +609,7 @@ mod tests {
         watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
             clients: vec![
-                ClientEntry { name: "mac".into(), edge: Edge::Right, offset: 0 },
+                ClientEntry { name: "mac".into(), edge: Edge::Right, offset: 0, modifier_map: Default::default() },
             ],
         })).1
     }
@@ -777,7 +781,7 @@ mod tests {
         let (clients, mut client_rx) = connected_clients();
         let config = watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
-            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
+            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0, modifier_map: Default::default() }],
         })).1;
         let (tx, rx) = mpsc::channel(16);
         let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
@@ -842,7 +846,7 @@ mod tests {
         let (clients, _client_rx) = connected_clients();
         let config = watch::channel(Arc::new(Config {
             server: ServerConfig { name: "server".into(), port: 24800 },
-            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0 }],
+            clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0, modifier_map: Default::default() }],
         })).1;
         let (event_tx, event_rx) = mpsc::channel(16);
         let (release_tx, mut release_rx) = mpsc::channel(4);
