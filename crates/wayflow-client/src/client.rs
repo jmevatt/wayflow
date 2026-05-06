@@ -1,23 +1,54 @@
 // Client connection loop.
 //
 // Client connection loop: TLS connect, handshake, event dispatch to the inject backend, Pong.
+// Auto-reconnects with exponential backoff on disconnect or transport error.
 
 use anyhow::{bail, Result};
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wayflow_core::{tls, transport};
 use wayflow_proto::{C2S, HelloC2S, S2C, ScreenInfo, PROTOCOL_VERSION};
 
 use crate::backend::InjectBackend;
 
+const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
+const RECONNECT_MAX: Duration = Duration::from_secs(5);
+
 pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     let tls_cfg = tls::client_tls_tofu(&server_addr)?;
     let connector = TlsConnector::from(Arc::new(tls_cfg));
+    // Backend lives across reconnects -- screen-size queries and key/button state are reusable.
+    let mut backend = crate::backend::create()?;
 
-    let tcp = tokio::net::TcpStream::connect(&server_addr).await?;
+    let mut backoff = RECONNECT_INITIAL;
+    loop {
+        match connect_once(&server_addr, &connector, &own_name, backend.as_mut()).await {
+            Ok(()) => {
+                info!("server disconnected; reconnecting in {:?}", RECONNECT_INITIAL);
+                backoff = RECONNECT_INITIAL;
+            }
+            Err(e) => {
+                warn!("connection error: {e:#}; reconnecting in {backoff:?}");
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(RECONNECT_MAX);
+    }
+}
+
+async fn connect_once(
+    server_addr: &str,
+    connector: &TlsConnector,
+    own_name: &str,
+    backend: &mut dyn InjectBackend,
+) -> Result<()> {
+    let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+    // Disable Nagle so small frames (Pong, EnterScreen) hit the wire without coalescing delay.
+    tcp.set_nodelay(true)?;
     info!("connected to {server_addr}");
 
     // Server cert is self-signed with subject "wayflow"; AcceptAny verifier ignores hostname.
@@ -28,14 +59,11 @@ pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     let tls = connector.connect(server_name, tcp).await?;
     let (mut r, mut w) = tokio::io::split(tls);
 
-    // Create backend before handshake so we can query real screen dimensions.
-    let mut backend = crate::backend::create()?;
     let (sw, sh) = backend.screen_size();
     info!("screen size: {sw}x{sh}");
 
-    // --- Handshake ---
     let my_screen = ScreenInfo {
-        name: own_name.clone(),
+        name: own_name.into(),
         x: 0,
         y: 0,
         width: sw,
@@ -43,7 +71,7 @@ pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     };
     transport::send_c2s(&mut w, &C2S::Hello(HelloC2S {
         version: PROTOCOL_VERSION,
-        name: own_name,
+        name: own_name.into(),
         screens: vec![my_screen],
     })).await?;
 
@@ -56,7 +84,7 @@ pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     }
     info!("handshake complete; server knows {} screen(s)", server_hello.screens.len());
 
-    event_loop(r, w, backend.as_mut()).await
+    event_loop(r, w, backend).await
 }
 
 /// Drive the inject backend from an already-established framed stream.

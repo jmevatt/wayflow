@@ -265,6 +265,11 @@ async fn handle_connection(
     clients: Clients,
     config: Arc<Config>,
 ) -> Result<()> {
+    // Disable Nagle so small frames (Ping, EnterScreen, single key events) hit the wire
+    // immediately. Coalescing them under load is fine; coalescing them when they're the
+    // only thing flowing for seconds at a time produces a sluggish-feeling KVM and can
+    // mask connection liveness.
+    stream.set_nodelay(true)?;
     let tls = acceptor.accept(stream).await?;
     let (r, w) = tokio::io::split(tls);
     handle_stream(r, w, peer, clients, config).await
