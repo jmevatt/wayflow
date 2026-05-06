@@ -18,6 +18,14 @@ pub struct RdevInject {
     display_origin: (f64, f64),
     #[cfg(target_os = "macos")]
     display_size: (u16, u16),
+    /// Multi-click tracking for the kCGMouseEventClickState field.
+    /// macOS uses click_state=1/2/3 to distinguish single/double/triple click
+    /// (drives word + line selection in text fields). Without it every press
+    /// looks like a single click and triple-click does nothing.
+    #[cfg(target_os = "macos")]
+    last_press: Option<(MouseButton, std::time::Instant)>,
+    #[cfg(target_os = "macos")]
+    click_count: i64,
 }
 
 impl RdevInject {
@@ -30,12 +38,21 @@ impl RdevInject {
                 right_down: false,
                 display_origin: origin,
                 display_size: size,
+                last_press: None,
+                click_count: 0,
             });
         }
         #[cfg(not(target_os = "macos"))]
         Ok(Self { left_down: false, right_down: false })
     }
 }
+
+/// macOS double-click time window. Real macOS reads this from the user's
+/// "Double-Click Speed" preference; 500ms is the default and what most
+/// users have. Could read kCGMouseEventDoubleClickInterval via core-graphics
+/// later if precision matters.
+#[cfg(target_os = "macos")]
+const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Compute the union bounding rectangle of all active macOS displays.
 /// Returns (origin (top-left in CG global coords), (width, height)).
@@ -123,7 +140,26 @@ impl InjectBackend for RdevInject {
         // sync with the OS over a long session, leading to "clicks stop
         // registering" after extended use.
         #[cfg(target_os = "macos")]
-        return mouse_button_macos(button, pressed);
+        {
+            // Update click count on press; release reuses whatever count is
+            // current. macOS expects click_state=1/2/3 on each Down event
+            // for single/double/triple clicks; omitting it makes triple-click
+            // text selection (word/sentence/paragraph) silently no-op.
+            if pressed {
+                let now = std::time::Instant::now();
+                self.click_count = match self.last_press {
+                    Some((prev_btn, prev_ts))
+                        if prev_btn == button
+                        && now.duration_since(prev_ts) < DOUBLE_CLICK_WINDOW =>
+                    {
+                        (self.click_count + 1).min(3)
+                    }
+                    _ => 1,
+                };
+                self.last_press = Some((button, now));
+            }
+            return mouse_button_macos(button, pressed, self.click_count);
+        }
 
         #[cfg(not(target_os = "macos"))]
         {
@@ -241,9 +277,13 @@ fn key_event_macos(cg_keycode: u16, pressed: bool) -> Result<()> {
 /// Post a mouse-button down/up CGEvent at the cursor's current location.
 /// Replaces rdev::simulate for mouse buttons on macOS; rdev's internal state
 /// drifts over long sessions and produces "clicks stopped registering" bugs.
+///
+/// `click_state` is the value of kCGMouseEventClickState on this event. Pass
+/// 1 for a single click, 2 for the press+release of a double click, 3 for
+/// triple. Set on both Down and Up events of the same multi-click sequence.
 #[cfg(target_os = "macos")]
-fn mouse_button_macos(button: MouseButton, pressed: bool) -> Result<()> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+fn mouse_button_macos(button: MouseButton, pressed: bool, click_state: i64) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let (etype, btn) = match (button, pressed) {
@@ -273,6 +313,7 @@ fn mouse_button_macos(button: MouseButton, pressed: bool) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("CGEvent::new failed"))?;
     let event = CGEvent::new_mouse_event(source, etype, cursor, btn)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event failed"))?;
+    event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
     event.post(CGEventTapLocation::HID);
     Ok(())
 }
