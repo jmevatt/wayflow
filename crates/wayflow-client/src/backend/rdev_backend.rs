@@ -165,6 +165,21 @@ impl InjectBackend for RdevInject {
     }
 
     fn key_event(&mut self, keycode: u32, pressed: bool, _modifiers: Modifiers) -> Result<()> {
+        // On macOS, post the keyboard event directly via core-graphics.
+        // rdev::simulate keeps internal modifier-flag state on macOS; over a
+        // long session the state can drift (a press without a corresponding
+        // release, dropped events, etc.) and produce stuck-modifier symptoms
+        // where keystrokes either do nothing or behave as if a phantom
+        // modifier is held. Direct CGEvent injection has no internal state.
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(cg_keycode) = wayflow_core::keymap::hid_to_cg_keycode(keycode) {
+                return key_event_macos(cg_keycode, pressed);
+            }
+            // Unmapped HID code -- fall back to rdev so we at least try.
+            tracing::debug!("HID {:#x} has no CG mapping; falling back to rdev", keycode);
+        }
+
         let key = match rdev_keys::hid_to_rdev(keycode) {
             Some(k) => k,
             None => {
@@ -199,6 +214,26 @@ fn scroll_macos(dx: i16, dy: i16) -> Result<()> {
     // wheel1 = vertical axis, wheel2 = horizontal axis
     let event = CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, vy, vx, 0)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_scroll_event failed"))?;
+    event.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+/// Post a keyboard down/up CGEvent for the given CG virtual keycode.
+/// We deliberately do NOT set CGEvent.flags here -- macOS's Window Server
+/// tracks modifier state from the press/release sequence of modifier
+/// keycodes, and overriding the flags is what causes rdev's drift bugs.
+/// As long as we send well-formed press/release pairs (which the server's
+/// held_keys flush guarantees on cursor return + capture deactivation),
+/// the Window Server's modifier tracking stays consistent.
+#[cfg(target_os = "macos")]
+fn key_event_macos(cg_keycode: u16, pressed: bool) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
+    let event = CGEvent::new_keyboard_event(source, cg_keycode, pressed)
+        .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
     event.post(CGEventTapLocation::HID);
     Ok(())
 }
