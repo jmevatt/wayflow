@@ -4,3 +4,5 @@
 *.orig
 # Cargo.lock is tracked for binary crates (wayflow-cli)
 # Do NOT add Cargo.lock here -- binaries need it for reproducible builds
+
+/.claude/settings.local.json
