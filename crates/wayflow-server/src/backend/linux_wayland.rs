@@ -58,7 +58,7 @@ async fn capture_async(
 
     let portal = InputCapture::new().await.context("InputCapture portal")?;
 
-    let capabilities = (Capabilities::Keyboard | Capabilities::Pointer).into();
+    let capabilities = Capabilities::Keyboard | Capabilities::Pointer;
     let (session, _) = portal
         .create_session(None, capabilities)
         .await
