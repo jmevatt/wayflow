@@ -28,6 +28,25 @@ use wayflow_proto::{Modifiers, MouseButton, ScreenInfo};
 
 use super::{CaptureBackend, InputEvent};
 
+/// Non-blocking emit into the InputEvent pipeline. We deliberately do NOT
+/// use `await`-blocking `send` here: if `route_events` is back-pressured
+/// (e.g. client TLS write is slow), blocking would propagate back-pressure
+/// into libei's internal buffer and EI events would be silently dropped
+/// inside libei with no log line. `try_send` makes the back-pressure
+/// observable in OUR logs, even though we still drop the event.
+fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent) {
+    use mpsc::error::TrySendError;
+    match tx.try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(dropped)) => {
+            warn!("input pipeline full (256 cap reached); dropping {dropped:?}");
+        }
+        Err(TrySendError::Closed(_)) => {
+            // route_events task has exited -- server is shutting down. Ignore.
+        }
+    }
+}
+
 pub struct LinuxWaylandCapture;
 
 impl CaptureBackend for LinuxWaylandCapture {
@@ -133,10 +152,10 @@ async fn capture_async(
                 let nudge_dir = nudge_dir_for_activation(&evt, &barrier_dirs);
                 debug!("capture activated id={activation_id:?} pos={pos:?} nudge_dir={nudge_dir:?}");
 
-                let _ = tx.send(InputEvent::MouseMoveAbs {
+                try_emit(&tx, InputEvent::MouseMoveAbs {
                     x: pos.0 as f64,
                     y: pos.1 as f64,
-                }).await;
+                });
 
                 let pos_f64 = (pos.0 as f64, pos.1 as f64);
                 active = Some(ActivationState {
@@ -229,17 +248,17 @@ async fn handle_ei_event(
             let state = active.as_mut().unwrap();
             state.cursor_pos.0 += evt.dx as f64;
             state.cursor_pos.1 += evt.dy as f64;
-            let _ = tx.send(InputEvent::MouseMoveAbs {
+            try_emit(tx, InputEvent::MouseMoveAbs {
                 x: state.cursor_pos.0,
                 y: state.cursor_pos.1,
-            }).await;
+            });
         }
 
         EiEvent::Button(evt) if active.is_some() => {
             use reis::ei::button::ButtonState;
             let button = evdev_to_mouse_button(evt.button);
             let pressed = evt.state == ButtonState::Press;
-            let _ = tx.send(InputEvent::MouseButton { button, pressed }).await;
+            try_emit(tx, InputEvent::MouseButton { button, pressed });
         }
 
         EiEvent::ScrollDelta(evt) if active.is_some() => {
@@ -254,7 +273,7 @@ async fn handle_ei_event(
             scroll_remainder.0 -= ix;
             scroll_remainder.1 -= iy;
             if ix != 0.0 || iy != 0.0 {
-                let _ = tx.send(InputEvent::Scroll { dx: ix, dy: iy }).await;
+                try_emit(tx, InputEvent::Scroll { dx: ix, dy: iy });
             }
         }
 
@@ -263,14 +282,14 @@ async fn handle_ei_event(
             // Negate because EI direction is opposite to rdev/CGEvent conventions.
             let dx = -(evt.discrete_dx as f64) / 120.0;
             let dy = -(evt.discrete_dy as f64) / 120.0;
-            let _ = tx.send(InputEvent::Scroll { dx, dy }).await;
+            try_emit(tx, InputEvent::Scroll { dx, dy });
         }
 
         EiEvent::KeyboardKey(evt) if active.is_some() => {
             use reis::ei::keyboard::KeyState;
             if let Some(hid) = wayflow_core::keymap::evdev::evdev_to_hid(evt.key) {
                 let pressed = evt.state == KeyState::Press;
-                let _ = tx.send(InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers }).await;
+                try_emit(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers });
             } else {
                 debug!("evdev key {} has no HID mapping, skipping", evt.key);
             }

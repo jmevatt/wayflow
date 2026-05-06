@@ -29,6 +29,24 @@ type Clients = Arc<RwLock<HashMap<String, (ScreenInfo, mpsc::Sender<S2C>)>>>;
 
 const PING_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
+/// If a single S2C send to write_task takes longer than this, log a warning.
+/// Indicates the client's TLS write is back-pressuring the routing loop.
+const SLOW_S2C_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(50);
+
+/// Send an S2C frame to a client's write_task channel and warn if it took
+/// longer than SLOW_S2C_THRESHOLD. We keep blocking semantics here (instead
+/// of try_send) so state-changing events like KeyEvent releases never get
+/// dropped -- a dropped key release means a stuck modifier on the client.
+/// Visibility into the back-pressure is enough; we don't need to drop.
+async fn send_s2c_timed(tx: &mpsc::Sender<S2C>, msg: S2C, label: &'static str) {
+    let start = tokio::time::Instant::now();
+    let _ = tx.send(msg).await;
+    let elapsed = start.elapsed();
+    if elapsed > SLOW_S2C_THRESHOLD {
+        warn!("S2C {label} send took {:?} -- client write is back-pressured", elapsed);
+    }
+}
+
 pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let (cert_path, key_path) = tls::default_cert_paths();
     let tls_cfg = tls::server_tls(&cert_path, &key_path)?;
@@ -108,7 +126,7 @@ async fn route_events(
                                 let map = clients.read().await;
                                 if let Some((screen, tx)) = map.get(&entry.name) {
                                     let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
-                                    let _ = tx.send(S2C::EnterScreen { x: cx, y: cy }).await;
+                                    send_s2c_timed(tx, S2C::EnterScreen { x: cx, y: cy }, "EnterScreen").await;
                                     active_client = Some(entry.name.clone());
                                     active_edge = Some(entry.edge);
                                     client_cursor = (cx as i32, cy as i32);
@@ -165,24 +183,24 @@ async fn route_events(
                             };
                             // Flush held keys before leaving so the client doesn't get stuck modifiers.
                             for rk in release_codes {
-                                let _ = tx.send(S2C::KeyEvent {
+                                send_s2c_timed(tx, S2C::KeyEvent {
                                     keycode: rk,
                                     pressed: false,
                                     modifiers: wayflow_proto::Modifiers::default(),
-                                }).await;
+                                }, "KeyRelease(flush)").await;
                             }
                             held_keys.clear();
-                            let _ = tx.send(S2C::LeaveScreen).await;
+                            send_s2c_timed(tx, S2C::LeaveScreen, "LeaveScreen").await;
                             drop(map);
                             active_client = None;
                             active_edge = None;
                             let _ = release_tx.try_send(());
                             debug!("cursor returned to server");
                         } else {
-                            let _ = tx.send(S2C::MouseMoveAbs {
+                            send_s2c_timed(tx, S2C::MouseMoveAbs {
                                 x: new_cx as u16,
                                 y: new_cy as u16,
-                            }).await;
+                            }, "MouseMoveAbs").await;
                         }
                     } else {
                         // Client disconnected while active -- clear state and
@@ -201,7 +219,7 @@ async fn route_events(
                 if let Some(ref name) = active_client {
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
-                        let _ = tx.send(S2C::MouseButton { button, pressed }).await;
+                        send_s2c_timed(tx, S2C::MouseButton { button, pressed }, "MouseButton").await;
                     }
                 }
             }
@@ -210,10 +228,10 @@ async fn route_events(
                 if let Some(ref name) = active_client {
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
-                        let _ = tx.send(S2C::Scroll {
+                        send_s2c_timed(tx, S2C::Scroll {
                             dx: dx.clamp(-32768.0, 32767.0) as i16,
                             dy: dy.clamp(-32768.0, 32767.0) as i16,
-                        }).await;
+                        }, "Scroll").await;
                     }
                 }
             }
@@ -230,7 +248,7 @@ async fn route_events(
                         if remapped != keycode {
                             debug!("modifier remap: {:#x} -> {:#x}", keycode, remapped);
                         }
-                        let _ = tx.send(S2C::KeyEvent { keycode: remapped, pressed, modifiers }).await;
+                        send_s2c_timed(tx, S2C::KeyEvent { keycode: remapped, pressed, modifiers }, "KeyEvent").await;
                     }
                 }
             }
