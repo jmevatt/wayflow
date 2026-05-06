@@ -65,7 +65,7 @@ fn mac_display_union() -> ((f64, f64), (u16, u16)) {
     }
     let w = (max_x - min_x).max(1.0) as u16;
     let h = (max_y - min_y).max(1.0) as u16;
-    tracing::info!(
+    tracing::debug!(
         "mac displays: {} active, union origin=({}, {}) size={}x{}",
         ids.len(), min_x, min_y, w, h
     );
