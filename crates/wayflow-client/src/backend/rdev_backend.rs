@@ -221,11 +221,12 @@ fn mouse_button_macos(button: MouseButton, pressed: bool) -> Result<()> {
         // Back/Forward/Other -- no native CGEventType; fall through to rdev.
         _ => {
             let rb = map_button(button);
-            return sim(if pressed {
-                &EventType::ButtonPress(rb)
+            let ev = if pressed {
+                EventType::ButtonPress(rb)
             } else {
-                &EventType::ButtonRelease(rb)
-            });
+                EventType::ButtonRelease(rb)
+            };
+            return sim(&ev);
         }
     };
 
