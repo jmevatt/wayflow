@@ -185,10 +185,14 @@ async fn route_events(
                             }).await;
                         }
                     } else {
-                        // Client disconnected while active -- clear state.
+                        // Client disconnected while active -- clear state and
+                        // tell the capture portal to release. Without the
+                        // release_tx the portal keeps capturing into a dead
+                        // sink and the server's cursor is stuck at the edge.
                         held_keys.clear();
                         active_client = None;
                         active_edge = None;
+                        let _ = release_tx.try_send(());
                     }
                 }
             }
