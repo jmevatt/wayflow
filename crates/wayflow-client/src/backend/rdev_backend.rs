@@ -117,11 +117,22 @@ impl InjectBackend for RdevInject {
             MouseButton::Right => self.right_down = pressed,
             _ => {}
         }
-        let btn = map_button(button);
-        if pressed {
-            sim(&EventType::ButtonPress(btn))
-        } else {
-            sim(&EventType::ButtonRelease(btn))
+
+        // On macOS, post the button event directly via core-graphics. rdev's
+        // simulate keeps internal mouse-button state that can drift out of
+        // sync with the OS over a long session, leading to "clicks stop
+        // registering" after extended use.
+        #[cfg(target_os = "macos")]
+        return mouse_button_macos(button, pressed);
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let btn = map_button(button);
+            if pressed {
+                sim(&EventType::ButtonPress(btn))
+            } else {
+                sim(&EventType::ButtonRelease(btn))
+            }
         }
     }
 
@@ -188,6 +199,44 @@ fn scroll_macos(dx: i16, dy: i16) -> Result<()> {
     // wheel1 = vertical axis, wheel2 = horizontal axis
     let event = CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, vy, vx, 0)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_scroll_event failed"))?;
+    event.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+/// Post a mouse-button down/up CGEvent at the cursor's current location.
+/// Replaces rdev::simulate for mouse buttons on macOS; rdev's internal state
+/// drifts over long sessions and produces "clicks stopped registering" bugs.
+#[cfg(target_os = "macos")]
+fn mouse_button_macos(button: MouseButton, pressed: bool) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let (etype, btn) = match (button, pressed) {
+        (MouseButton::Left,   true)  => (CGEventType::LeftMouseDown,   CGMouseButton::Left),
+        (MouseButton::Left,   false) => (CGEventType::LeftMouseUp,     CGMouseButton::Left),
+        (MouseButton::Right,  true)  => (CGEventType::RightMouseDown,  CGMouseButton::Right),
+        (MouseButton::Right,  false) => (CGEventType::RightMouseUp,    CGMouseButton::Right),
+        (MouseButton::Middle, true)  => (CGEventType::OtherMouseDown,  CGMouseButton::Center),
+        (MouseButton::Middle, false) => (CGEventType::OtherMouseUp,    CGMouseButton::Center),
+        // Back/Forward/Other -- no native CGEventType; fall through to rdev.
+        _ => {
+            let rb = map_button(button);
+            return sim(if pressed {
+                &EventType::ButtonPress(rb)
+            } else {
+                &EventType::ButtonRelease(rb)
+            });
+        }
+    };
+
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
+    // CGEventCreate(NULL) returns a "null event" whose location is the current cursor.
+    let cursor = CGEvent::new(source.clone())
+        .map(|e| e.location())
+        .map_err(|_| anyhow::anyhow!("CGEvent::new failed"))?;
+    let event = CGEvent::new_mouse_event(source, etype, cursor, btn)
+        .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event failed"))?;
     event.post(CGEventTapLocation::HID);
     Ok(())
 }
