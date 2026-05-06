@@ -2,12 +2,15 @@
 //
 // Client connection loop: TLS connect, handshake, event dispatch to the inject backend, Pong.
 // Auto-reconnects with exponential backoff on disconnect or transport error.
+// Polls the platform display layout every SCREEN_POLL_INTERVAL and pushes a
+// C2S::ScreenLayoutUpdate to the server when monitors are connected/disconnected.
 
 use anyhow::{bail, Result};
 use rustls::pki_types::ServerName;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 use wayflow_core::{tls, transport};
@@ -17,6 +20,7 @@ use crate::backend::InjectBackend;
 
 const RECONNECT_INITIAL: Duration = Duration::from_millis(500);
 const RECONNECT_MAX: Duration = Duration::from_secs(5);
+const SCREEN_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub async fn run(server_addr: String, own_name: String) -> Result<()> {
     let tls_cfg = tls::client_tls_tofu(&server_addr)?;
@@ -84,57 +88,131 @@ async fn connect_once(
     }
     info!("handshake complete; server knows {} screen(s)", server_hello.screens.len());
 
-    event_loop(r, w, backend).await
+    event_loop(r, w, backend, own_name).await
 }
 
 /// Drive the inject backend from an already-established framed stream.
+///
+/// Spawns separate reader and writer tasks so the main task can `tokio::select!`
+/// between incoming server messages (via cancel-safe mpsc) and a periodic
+/// screen-layout poll without risking partial-frame reads on cancellation.
+///
 /// Exposed for testing with in-memory streams and mock backends.
 pub(crate) async fn event_loop<R, W>(
-    mut r: R,
-    mut w: W,
+    r: R,
+    w: W,
     backend: &mut dyn InjectBackend,
+    own_name: &str,
 ) -> Result<()>
 where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
-    loop {
-        match transport::recv_s2c(&mut r).await {
-            Ok(S2C::EnterScreen { x, y }) => {
-                info!("entering screen at ({x}, {y})");
-                backend.move_abs(x, y)?;
+    let (read_tx, mut read_rx) = mpsc::channel::<Result<S2C>>(16);
+    let (write_tx, write_rx) = mpsc::channel::<C2S>(16);
+
+    let read_task = tokio::spawn(reader_task(r, read_tx));
+    let write_task = tokio::spawn(writer_task(w, write_rx));
+
+    let mut poll = tokio::time::interval(SCREEN_POLL_INTERVAL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll.tick().await; // first tick fires immediately -- consume it
+    let mut last_size = backend.screen_size();
+
+    let result: Result<()> = loop {
+        tokio::select! {
+            msg = read_rx.recv() => {
+                match msg {
+                    Some(Ok(s2c)) => {
+                        match handle_msg(s2c, backend, &write_tx).await {
+                            Ok(true) => continue,
+                            Ok(false) => break Ok(()),
+                            Err(e) => break Err(e),
+                        }
+                    }
+                    Some(Err(e)) => {
+                        info!("server disconnected: {e}");
+                        break Ok(());
+                    }
+                    None => break Ok(()),
+                }
             }
-            Ok(S2C::LeaveScreen) => {
-                info!("leaving screen");
-            }
-            Ok(S2C::MouseMoveAbs { x, y }) => {
-                backend.move_abs(x, y)?;
-            }
-            Ok(S2C::MouseButton { button, pressed }) => {
-                backend.mouse_button(button, pressed)?;
-            }
-            Ok(S2C::Scroll { dx, dy }) => {
-                backend.scroll(dx, dy)?;
-            }
-            Ok(S2C::KeyEvent { keycode, pressed, modifiers }) => {
-                backend.key_event(keycode, pressed, modifiers)?;
-            }
-            Ok(S2C::ClipboardData(_content)) => {
-                // TODO: write to local clipboard via smithay-clipboard / arboard
-                info!("clipboard sync received (not yet implemented)");
-            }
-            Ok(S2C::Ping) => {
-                debug!("ping");
-                transport::send_c2s(&mut w, &C2S::Pong).await?;
-            }
-            Ok(S2C::Hello(_)) => bail!("unexpected second Hello from server -- protocol error"),
-            Err(e) => {
-                info!("server disconnected: {e}");
-                break;
+            _ = poll.tick() => {
+                let cur = backend.refresh_screen_size();
+                if cur != last_size {
+                    info!("screen layout changed: {}x{} -> {}x{}",
+                          last_size.0, last_size.1, cur.0, cur.1);
+                    let screen = ScreenInfo {
+                        name: own_name.into(),
+                        x: 0, y: 0,
+                        width: cur.0, height: cur.1,
+                    };
+                    if write_tx.send(C2S::ScreenLayoutUpdate { screens: vec![screen] }).await.is_err() {
+                        break Ok(());
+                    }
+                    last_size = cur;
+                }
             }
         }
+    };
+
+    drop(write_tx);
+    read_task.abort();
+    let _ = write_task.await;
+    let _ = read_task.await;
+    result
+}
+
+async fn reader_task<R: AsyncRead + Unpin>(mut r: R, tx: mpsc::Sender<Result<S2C>>) {
+    loop {
+        let res = transport::recv_s2c(&mut r).await;
+        let is_err = res.is_err();
+        if tx.send(res).await.is_err() || is_err {
+            break;
+        }
     }
-    Ok(())
+}
+
+async fn writer_task<W: AsyncWrite + Unpin>(mut w: W, mut rx: mpsc::Receiver<C2S>) {
+    while let Some(msg) = rx.recv().await {
+        if transport::send_c2s(&mut w, &msg).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Returns Ok(true) to continue, Ok(false) to exit cleanly (writer dead),
+/// Err(_) to abort with a protocol error.
+async fn handle_msg(
+    msg: S2C,
+    backend: &mut dyn InjectBackend,
+    write_tx: &mpsc::Sender<C2S>,
+) -> Result<bool> {
+    match msg {
+        S2C::EnterScreen { x, y } => {
+            info!("entering screen at ({x}, {y})");
+            backend.move_abs(x, y)?;
+        }
+        S2C::LeaveScreen => info!("leaving screen"),
+        S2C::MouseMoveAbs { x, y } => backend.move_abs(x, y)?,
+        S2C::MouseButton { button, pressed } => backend.mouse_button(button, pressed)?,
+        S2C::Scroll { dx, dy } => backend.scroll(dx, dy)?,
+        S2C::KeyEvent { keycode, pressed, modifiers } => {
+            backend.key_event(keycode, pressed, modifiers)?
+        }
+        S2C::ClipboardData(_) => {
+            // TODO: write to local clipboard via smithay-clipboard / arboard
+            info!("clipboard sync received (not yet implemented)");
+        }
+        S2C::Ping => {
+            debug!("ping");
+            if write_tx.send(C2S::Pong).await.is_err() {
+                return Ok(false);
+            }
+        }
+        S2C::Hello(_) => bail!("unexpected second Hello from server -- protocol error"),
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -216,7 +294,7 @@ mod tests {
         drop(server_side); // EOF after the message
 
         let (mut backend, calls) = MockBackend::new();
-        event_loop(client_r, client_w, &mut backend).await.unwrap();
+        event_loop(client_r, client_w, &mut backend, "test").await.unwrap();
         let result = calls.lock().unwrap().clone();
         result
     }
@@ -280,7 +358,7 @@ mod tests {
         let (backend, backend_arc) = MockBackend::new();
 
         let mut backend = backend;
-        let task = tokio::spawn(async move { event_loop(client_r, client_w, &mut backend).await });
+        let task = tokio::spawn(async move { event_loop(client_r, client_w, &mut backend, "test").await });
         transport::send_s2c(&mut server_side, &S2C::Hello(HelloS2C {
             version: PROTOCOL_VERSION,
             screens: vec![],
@@ -306,7 +384,7 @@ mod tests {
         });
 
         let (mut backend, _) = MockBackend::new();
-        event_loop(client_r, client_w, &mut backend).await.unwrap();
+        event_loop(client_r, client_w, &mut backend, "test").await.unwrap();
         server_task.await.unwrap();
     }
 
@@ -320,7 +398,7 @@ mod tests {
         transport::send_s2c(&mut server_side, &S2C::MouseMoveAbs { x: 0, y: 0 }).await.unwrap();
 
         let mut backend = MockBackend::failing(Call::MoveAbs(0, 0));
-        let result = event_loop(client_r, client_w, &mut backend).await;
+        let result = event_loop(client_r, client_w, &mut backend, "test").await;
         assert!(result.is_err());
     }
 
@@ -334,7 +412,7 @@ mod tests {
         }).await.unwrap();
 
         let mut backend = MockBackend::failing(Call::MouseButton(MouseButton::Left, true));
-        let result = event_loop(client_r, client_w, &mut backend).await;
+        let result = event_loop(client_r, client_w, &mut backend, "test").await;
         assert!(result.is_err());
     }
 
@@ -346,7 +424,7 @@ mod tests {
         transport::send_s2c(&mut server_side, &S2C::Scroll { dx: 1, dy: 1 }).await.unwrap();
 
         let mut backend = MockBackend::failing(Call::Scroll(1, 1));
-        let result = event_loop(client_r, client_w, &mut backend).await;
+        let result = event_loop(client_r, client_w, &mut backend, "test").await;
         assert!(result.is_err());
     }
 
@@ -360,7 +438,7 @@ mod tests {
         }).await.unwrap();
 
         let mut backend = MockBackend::failing(Call::KeyEvent(1, false));
-        let result = event_loop(client_r, client_w, &mut backend).await;
+        let result = event_loop(client_r, client_w, &mut backend, "test").await;
         assert!(result.is_err());
     }
 
@@ -373,7 +451,7 @@ mod tests {
         drop(server_side);
 
         let (mut backend, _) = MockBackend::new();
-        let result = event_loop(client_r, client_w, &mut backend).await;
+        let result = event_loop(client_r, client_w, &mut backend, "test").await;
         assert!(result.is_ok());
     }
 
@@ -390,6 +468,6 @@ mod tests {
 
         let (mut backend, _) = MockBackend::new();
         // The Pong write may fail or succeed depending on buffering; either way no panic
-        let _ = event_loop(client_r, client_w, &mut backend).await;
+        let _ = event_loop(client_r, client_w, &mut backend, "test").await;
     }
 }

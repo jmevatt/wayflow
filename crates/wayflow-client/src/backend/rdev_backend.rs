@@ -9,12 +9,67 @@ use wayflow_proto::{Modifiers, MouseButton};
 pub struct RdevInject {
     left_down: bool,
     right_down: bool,
+    /// macOS: union of all active displays' bounds at construction time.
+    /// origin is the top-left of the union in CG global coords (can be
+    /// negative if a display sits to the left of the main display).
+    /// size is the full union extent. screen_size() reports size; move_abs
+    /// translates incoming server-relative coords by adding origin.
+    #[cfg(target_os = "macos")]
+    display_origin: (f64, f64),
+    #[cfg(target_os = "macos")]
+    display_size: (u16, u16),
 }
 
 impl RdevInject {
     pub fn new() -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let (origin, size) = mac_display_union();
+            return Ok(Self {
+                left_down: false,
+                right_down: false,
+                display_origin: origin,
+                display_size: size,
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
         Ok(Self { left_down: false, right_down: false })
     }
+}
+
+/// Compute the union bounding rectangle of all active macOS displays.
+/// Returns (origin (top-left in CG global coords), (width, height)).
+#[cfg(target_os = "macos")]
+fn mac_display_union() -> ((f64, f64), (u16, u16)) {
+    use core_graphics::display::CGDisplay;
+
+    let ids = CGDisplay::active_displays().unwrap_or_default();
+    if ids.is_empty() {
+        let b = CGDisplay::main().bounds();
+        return (
+            (b.origin.x, b.origin.y),
+            (b.size.width as u16, b.size.height as u16),
+        );
+    }
+
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for id in &ids {
+        let b = CGDisplay::new(*id).bounds();
+        min_x = min_x.min(b.origin.x);
+        min_y = min_y.min(b.origin.y);
+        max_x = max_x.max(b.origin.x + b.size.width);
+        max_y = max_y.max(b.origin.y + b.size.height);
+    }
+    let w = (max_x - min_x).max(1.0) as u16;
+    let h = (max_y - min_y).max(1.0) as u16;
+    tracing::info!(
+        "mac displays: {} active, union origin=({}, {}) size={}x{}",
+        ids.len(), min_x, min_y, w, h
+    );
+    ((min_x, min_y), (w, h))
 }
 
 fn sim(event: &EventType) -> Result<()> {
@@ -44,7 +99,13 @@ impl InjectBackend for RdevInject {
         // not kCGEventMouseMoved. rdev always emits MouseMoved, so we bypass it when
         // a button is held and post the drag event type directly via core-graphics.
         #[cfg(target_os = "macos")]
-        return move_abs_macos(x as f64, y as f64, self.left_down, self.right_down);
+        {
+            // Server sends coords in client-relative space (0..union_w, 0..union_h).
+            // Translate to CG global coords by adding the union origin.
+            let gx = x as f64 + self.display_origin.0;
+            let gy = y as f64 + self.display_origin.1;
+            return move_abs_macos(gx, gy, self.left_down, self.right_down);
+        }
 
         #[cfg(not(target_os = "macos"))]
         sim(&EventType::MouseMove { x: x as f64, y: y as f64 })
@@ -74,10 +135,19 @@ impl InjectBackend for RdevInject {
 
     fn screen_size(&self) -> (u16, u16) {
         #[cfg(target_os = "macos")]
+        return self.display_size;
+
+        #[cfg(not(target_os = "macos"))]
+        (1920, 1080)
+    }
+
+    fn refresh_screen_size(&mut self) -> (u16, u16) {
+        #[cfg(target_os = "macos")]
         {
-            use core_graphics::display::CGDisplay;
-            let bounds = CGDisplay::main().bounds();
-            return (bounds.size.width as u16, bounds.size.height as u16);
+            let (origin, size) = mac_display_union();
+            self.display_origin = origin;
+            self.display_size = size;
+            return size;
         }
         #[cfg(not(target_os = "macos"))]
         (1920, 1080)
@@ -186,7 +256,7 @@ mod tests {
 
     #[test]
     fn button_state_tracks_left_down() {
-        let mut b = RdevInject { left_down: false, right_down: false };
+        let mut b = RdevInject::new().unwrap();
         b.left_down = true;
         assert!(b.left_down);
         b.left_down = false;

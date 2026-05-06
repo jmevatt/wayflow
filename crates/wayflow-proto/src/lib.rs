@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -95,6 +95,9 @@ pub enum C2S {
     /// Client's clipboard changed; server should sync to other screens.
     ClipboardData(ClipboardContent),
     Pong,
+    /// Client's display layout changed (monitor connect/disconnect, arrangement
+    /// rearranged). Server should update its stored screen dims for clamp logic.
+    ScreenLayoutUpdate { screens: Vec<ScreenInfo> },
 }
 
 // ---------------------------------------------------------------------------
@@ -285,5 +288,19 @@ mod tests {
     #[test]
     fn c2s_pong() {
         rt(&C2S::Pong);
+    }
+
+    #[test]
+    fn c2s_screen_layout_update() {
+        rt(&C2S::ScreenLayoutUpdate {
+            screens: alloc::vec![
+                ScreenInfo { name: "mac".into(), x: 0, y: 0, width: 4880, height: 1440 },
+            ],
+        });
+        rt(&C2S::ScreenLayoutUpdate {
+            screens: alloc::vec![
+                ScreenInfo { name: "mac".into(), x: 0, y: 0, width: 1440, height: 900 },
+            ],
+        });
     }
 }

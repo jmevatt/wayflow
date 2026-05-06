@@ -360,6 +360,20 @@ where
                     }
                 }
             }
+            Ok(C2S::ScreenLayoutUpdate { screens }) => {
+                if let Some(new_screen) = screens.into_iter().next() {
+                    if new_screen.width == 0 || new_screen.height == 0 {
+                        warn!("{name} sent invalid screen dims ({}x{}), ignoring",
+                              new_screen.width, new_screen.height);
+                    } else {
+                        info!("{name} layout update: {}x{}", new_screen.width, new_screen.height);
+                        let mut map = clients.write().await;
+                        if let Some(entry) = map.get_mut(&name) {
+                            entry.0 = new_screen;
+                        }
+                    }
+                }
+            }
             Ok(C2S::Hello(_)) => warn!("unexpected re-Hello from {name}"),
             Err(e) => {
                 info!("client {name} disconnected: {e}");

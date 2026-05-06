@@ -8,10 +8,17 @@ pub trait InjectBackend: Send + 'static {
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()>;
     fn scroll(&mut self, dx: i16, dy: i16) -> Result<()>;
     fn key_event(&mut self, keycode: u32, pressed: bool, modifiers: Modifiers) -> Result<()>;
-    /// Return the primary screen's logical dimensions in points/pixels.
+    /// Return the cached union dimensions of the client's display layout.
     /// Used to report screen size to the server during handshake.
     fn screen_size(&self) -> (u16, u16) {
         (1920, 1080)
+    }
+    /// Re-query the platform for the current display layout, refresh any
+    /// cached state (e.g. global display origin used for coordinate
+    /// translation), and return the new dimensions. Called periodically by
+    /// the client's event loop to detect monitor connect/disconnect.
+    fn refresh_screen_size(&mut self) -> (u16, u16) {
+        self.screen_size()
     }
 }
 
