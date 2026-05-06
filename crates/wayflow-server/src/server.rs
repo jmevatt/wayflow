@@ -84,6 +84,9 @@ async fn route_events(
     let mut active_edge: Option<Edge> = None;
     let mut server_cursor = (0i32, 0i32);
     let mut client_cursor = (0i32, 0i32);
+    // Keycodes (pre-remap HID) currently held on the active client.
+    // Flushed as synthetic key-up events on LeaveScreen to prevent stuck keys.
+    let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     while let Some(event) = rx.recv().await {
         if monitors_rx.has_changed().unwrap_or(false) {
@@ -109,6 +112,7 @@ async fn route_events(
                                     active_client = Some(entry.name.clone());
                                     active_edge = Some(entry.edge);
                                     client_cursor = (cx as i32, cy as i32);
+                                    held_keys.clear();
                                     debug!("cursor -> {:?} at ({cx}, {cy})", entry.name);
                                 } else {
                                     // Client configured but not connected -- release immediately.
@@ -123,6 +127,8 @@ async fn route_events(
                     }
                     server_cursor = (sx, sy);
                 } else {
+                    // SAFETY: active_client is Some whenever we're in this branch --
+                    // the outer `if active_client.is_none()` already handled the None case above.
                     let name = active_client.as_ref().unwrap().clone();
                     let dx = sx - server_cursor.0;
                     let dy = sy - server_cursor.1;
@@ -136,6 +142,8 @@ async fn route_events(
 
                         // Only the edge facing back toward the server triggers a return.
                         // Other client edges clamp the cursor (normal screen boundary).
+                        // SAFETY: active_edge is always set alongside active_client -- both become
+                        // Some in the enter-client path above and are cleared together on return.
                         let at_return_edge = match active_edge.unwrap() {
                             Edge::Left   => new_cx == screen.width  as i32 - 1,
                             Edge::Right  => new_cx == 0,
@@ -144,6 +152,26 @@ async fn route_events(
                         };
 
                         if at_return_edge {
+                            // Collect remapped release codes before any await -- the watch
+                            // borrow guard isn't Send and can't be held across an await point.
+                            let release_codes: Vec<u32> = {
+                                let cfg = config_rx.borrow();
+                                let client_cfg = cfg.clients.iter().find(|c| c.name == name);
+                                held_keys.iter().map(|&hk| {
+                                    client_cfg
+                                        .map(|c| remap_modifier_key(&c.modifier_map, hk))
+                                        .unwrap_or(hk)
+                                }).collect()
+                            };
+                            // Flush held keys before leaving so the client doesn't get stuck modifiers.
+                            for rk in release_codes {
+                                let _ = tx.send(S2C::KeyEvent {
+                                    keycode: rk,
+                                    pressed: false,
+                                    modifiers: wayflow_proto::Modifiers::default(),
+                                }).await;
+                            }
+                            held_keys.clear();
                             let _ = tx.send(S2C::LeaveScreen).await;
                             drop(map);
                             active_client = None;
@@ -157,6 +185,8 @@ async fn route_events(
                             }).await;
                         }
                     } else {
+                        // Client disconnected while active -- clear state.
+                        held_keys.clear();
                         active_client = None;
                         active_edge = None;
                     }
@@ -176,19 +206,26 @@ async fn route_events(
                 if let Some(ref name) = active_client {
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
-                        let _ = tx.send(S2C::Scroll { dx: dx as i16, dy: dy as i16 }).await;
+                        let _ = tx.send(S2C::Scroll {
+                            dx: dx.clamp(-32768.0, 32767.0) as i16,
+                            dy: dy.clamp(-32768.0, 32767.0) as i16,
+                        }).await;
                     }
                 }
             }
 
             InputEvent::Key { keycode, pressed, modifiers } => {
                 if let Some(ref name) = active_client {
+                    if pressed { held_keys.insert(keycode); } else { held_keys.remove(&keycode); }
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
                         let remapped = config_rx.borrow().clients.iter()
                             .find(|c| c.name == *name)
                             .map(|c| remap_modifier_key(&c.modifier_map, keycode))
                             .unwrap_or(keycode);
+                        if remapped != keycode {
+                            debug!("modifier remap: {:#x} -> {:#x}", keycode, remapped);
+                        }
                         let _ = tx.send(S2C::KeyEvent { keycode: remapped, pressed, modifiers }).await;
                     }
                 }
