@@ -5,7 +5,7 @@
 //   2. route_events:  translate InputEvents from the capture backend into
 //      S2C messages for the focused client, using edge detection.
 
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, sync::atomic::Ordering, time::SystemTime};
 use anyhow::{bail, Result};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -23,6 +23,7 @@ use wayflow_core::{
 use wayflow_proto::{C2S, HelloS2C, S2C, ScreenInfo, PROTOCOL_VERSION};
 
 use crate::backend::InputEvent;
+use crate::telemetry::{RouteSnapshot, Telemetry};
 
 // Map of client name -> (primary screen, channel to deliver S2C messages).
 type Clients = Arc<RwLock<HashMap<String, (ScreenInfo, mpsc::Sender<S2C>)>>>;
@@ -38,11 +39,17 @@ const SLOW_S2C_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_mi
 /// of try_send) so state-changing events like KeyEvent releases never get
 /// dropped -- a dropped key release means a stuck modifier on the client.
 /// Visibility into the back-pressure is enough; we don't need to drop.
-async fn send_s2c_timed(tx: &mpsc::Sender<S2C>, msg: S2C, label: &'static str) {
+async fn send_s2c_timed(
+    tx: &mpsc::Sender<S2C>,
+    msg: S2C,
+    label: &'static str,
+    telemetry: &Telemetry,
+) {
     let start = tokio::time::Instant::now();
     let _ = tx.send(msg).await;
     let elapsed = start.elapsed();
     if elapsed > SLOW_S2C_THRESHOLD {
+        telemetry.s2c_slow_sends.fetch_add(1, Ordering::Relaxed);
         warn!("S2C {label} send took {:?} -- client write is back-pressured", elapsed);
     }
 }
@@ -71,23 +78,114 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     }];
     let (monitors_tx, monitors_rx) = watch::channel(initial_monitors);
 
+    // Telemetry counters + a watch-published snapshot of route_events' state.
+    // Read by the SIGUSR1 handler to produce JSON dumps at
+    // /tmp/wayflow-server-state.json on demand.
+    let telemetry = Arc::new(Telemetry::default());
+    let (snap_tx, snap_rx) = watch::channel(RouteSnapshot::default());
+
     tokio::spawn(watch_config(config_path, config_tx));
+    tokio::spawn(state_dump_handler(
+        telemetry.clone(), snap_rx, clients.clone(),
+    ));
 
     let routing_clients = clients.clone();
+    let routing_telemetry = telemetry.clone();
     tokio::spawn(async move {
-        if let Err(e) = route_events(event_rx, routing_clients, config_rx, monitors_rx, release_tx).await {
+        if let Err(e) = route_events(
+            event_rx, routing_clients, config_rx, monitors_rx, release_tx,
+            routing_telemetry, snap_tx,
+        ).await {
             warn!("route_events exited: {e:#}");
         }
     });
 
     let event_tx_capture = event_tx.clone();
+    let capture_telemetry = telemetry.clone();
     std::thread::spawn(move || {
-        if let Err(e) = crate::backend::start_capture(event_tx_capture, release_rx, monitors_tx) {
+        if let Err(e) = crate::backend::start_capture(event_tx_capture, release_rx, monitors_tx, capture_telemetry) {
             warn!("capture backend error: {e:#}");
         }
     });
 
     serve(Arc::new(config), listener, acceptor, clients).await
+}
+
+/// SIGUSR1-triggered state dump. Writes a JSON snapshot of route_events
+/// state + telemetry counters + connected clients to a fixed path so a
+/// debugger (Claude or human) can inspect runtime state without disrupting
+/// the routing loop.
+async fn state_dump_handler(
+    telemetry: Arc<Telemetry>,
+    snap_rx: watch::Receiver<RouteSnapshot>,
+    clients: Clients,
+) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigusr1 = match signal(SignalKind::user_defined1()) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("failed to install SIGUSR1 handler: {e}");
+            return;
+        }
+    };
+    info!("SIGUSR1 -> /tmp/wayflow-server-state.json (kill -USR1 <pid> to dump)");
+
+    while sigusr1.recv().await.is_some() {
+        let snap = snap_rx.borrow().clone();
+        let connected: Vec<String> = clients.read().await.keys().cloned().collect();
+        let ts_ms = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let dump = serde_json::json!({
+            "ts_ms": ts_ms,
+            "snapshot": snap,
+            "telemetry": telemetry.snapshot(),
+            "connected_clients": connected,
+        });
+        let path = std::path::Path::new("/tmp/wayflow-server-state.json");
+        match serde_json::to_string_pretty(&dump) {
+            Ok(s) => {
+                if let Err(e) = std::fs::write(path, s) {
+                    warn!("state dump write failed: {e}");
+                } else {
+                    telemetry.dumps_emitted.fetch_add(1, Ordering::Relaxed);
+                    info!("state dumped to {}", path.display());
+                }
+            }
+            Err(e) => warn!("state dump serialize failed: {e}"),
+        }
+    }
+}
+
+fn edge_label(e: Edge) -> String {
+    match e {
+        Edge::Left => "Left", Edge::Right => "Right",
+        Edge::Top => "Top", Edge::Bottom => "Bottom",
+    }.into()
+}
+
+fn publish_snapshot(
+    snap_tx: &watch::Sender<RouteSnapshot>,
+    active_client: &Option<String>,
+    active_edge: Option<Edge>,
+    server_cursor: (i32, i32),
+    client_cursor: (i32, i32),
+    held_keys: &std::collections::HashSet<u32>,
+    layout: &ServerLayout,
+) {
+    let mut held: Vec<String> = held_keys.iter().map(|k| format!("{k:#x}")).collect();
+    held.sort();
+    let _ = snap_tx.send(RouteSnapshot {
+        active_client: active_client.clone(),
+        active_edge: active_edge.map(edge_label),
+        server_cursor,
+        client_cursor,
+        held_keys: held,
+        monitor_count: layout.monitor_count(),
+        server_screens: layout.screens().to_vec(),
+    });
 }
 
 async fn route_events(
@@ -96,6 +194,8 @@ async fn route_events(
     config_rx: watch::Receiver<Arc<Config>>,
     mut monitors_rx: watch::Receiver<Vec<ScreenInfo>>,
     release_tx: mpsc::Sender<()>,
+    telemetry: Arc<Telemetry>,
+    snap_tx: watch::Sender<RouteSnapshot>,
 ) -> Result<()> {
     let mut layout = ServerLayout::new(monitors_rx.borrow().clone());
     let mut active_client: Option<String> = None;
@@ -105,6 +205,14 @@ async fn route_events(
     // Keycodes (pre-remap HID) currently held on the active client.
     // Flushed as synthetic key-up events on LeaveScreen to prevent stuck keys.
     let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    // Helper: republish snapshot. Cheap; watch is lock-free.
+    let publish = |ac: &Option<String>, ae: Option<Edge>, sc: (i32, i32),
+                   cc: (i32, i32), hk: &std::collections::HashSet<u32>,
+                   ly: &ServerLayout| {
+        publish_snapshot(&snap_tx, ac, ae, sc, cc, hk, ly);
+    };
+    publish(&active_client, active_edge, server_cursor, client_cursor, &held_keys, &layout);
 
     while let Some(event) = rx.recv().await {
         if monitors_rx.has_changed().unwrap_or(false) {
@@ -126,7 +234,7 @@ async fn route_events(
                                 let map = clients.read().await;
                                 if let Some((screen, tx)) = map.get(&entry.name) {
                                     let (cx, cy) = map_to_client(sx, sy, screen, edge, entry.offset);
-                                    send_s2c_timed(tx, S2C::EnterScreen { x: cx, y: cy }, "EnterScreen").await;
+                                    send_s2c_timed(tx, S2C::EnterScreen { x: cx, y: cy }, "EnterScreen", &telemetry).await;
                                     active_client = Some(entry.name.clone());
                                     active_edge = Some(entry.edge);
                                     client_cursor = (cx as i32, cy as i32);
@@ -187,10 +295,10 @@ async fn route_events(
                                     keycode: rk,
                                     pressed: false,
                                     modifiers: wayflow_proto::Modifiers::default(),
-                                }, "KeyRelease(flush)").await;
+                                }, "KeyRelease(flush)", &telemetry).await;
                             }
                             held_keys.clear();
-                            send_s2c_timed(tx, S2C::LeaveScreen, "LeaveScreen").await;
+                            send_s2c_timed(tx, S2C::LeaveScreen, "LeaveScreen", &telemetry).await;
                             drop(map);
                             active_client = None;
                             active_edge = None;
@@ -200,7 +308,7 @@ async fn route_events(
                             send_s2c_timed(tx, S2C::MouseMoveAbs {
                                 x: new_cx as u16,
                                 y: new_cy as u16,
-                            }, "MouseMoveAbs").await;
+                            }, "MouseMoveAbs", &telemetry).await;
                         }
                     } else {
                         // Client disconnected while active -- clear state and
@@ -219,7 +327,7 @@ async fn route_events(
                 if let Some(ref name) = active_client {
                     let map = clients.read().await;
                     if let Some((_, tx)) = map.get(name) {
-                        send_s2c_timed(tx, S2C::MouseButton { button, pressed }, "MouseButton").await;
+                        send_s2c_timed(tx, S2C::MouseButton { button, pressed }, "MouseButton", &telemetry).await;
                     }
                 }
             }
@@ -231,7 +339,7 @@ async fn route_events(
                         send_s2c_timed(tx, S2C::Scroll {
                             dx: dx.clamp(-32768.0, 32767.0) as i16,
                             dy: dy.clamp(-32768.0, 32767.0) as i16,
-                        }, "Scroll").await;
+                        }, "Scroll", &telemetry).await;
                     }
                 }
             }
@@ -248,11 +356,14 @@ async fn route_events(
                         if remapped != keycode {
                             debug!("modifier remap: {:#x} -> {:#x}", keycode, remapped);
                         }
-                        send_s2c_timed(tx, S2C::KeyEvent { keycode: remapped, pressed, modifiers }, "KeyEvent").await;
+                        send_s2c_timed(tx, S2C::KeyEvent { keycode: remapped, pressed, modifiers }, "KeyEvent", &telemetry).await;
                     }
                 }
             }
         }
+
+        // Publish state snapshot after each event so SIGUSR1 reads fresh data.
+        publish(&active_client, active_edge, server_cursor, client_cursor, &held_keys, &layout);
     }
     Ok(())
 }
@@ -724,7 +835,7 @@ mod tests {
     async fn edge_crossing_sends_enter_screen() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         // Right edge of 2560x1440 server at y=720
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -739,7 +850,7 @@ mod tests {
     async fn no_enter_when_cursor_not_at_edge() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::MouseMoveAbs { x: 1000.0, y: 720.0 }).await.unwrap();
         drop(tx);
@@ -752,7 +863,7 @@ mod tests {
     async fn mouse_move_forwarded_while_on_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         // Enter client: cursor at right edge (2559, 720) -> EnterScreen { x: 0, y: 720 }
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -770,7 +881,7 @@ mod tests {
     async fn leave_screen_when_cursor_hits_client_left_edge() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         // Enter at right edge -> client cursor at (0, 720)
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -788,7 +899,7 @@ mod tests {
     async fn key_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::Key {
@@ -812,7 +923,7 @@ mod tests {
     async fn button_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::MouseButton { button: MouseButton::Left, pressed: true }).await.unwrap();
@@ -827,7 +938,7 @@ mod tests {
     async fn scroll_forwarded_to_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         tx.send(InputEvent::Scroll { dx: 3.0, dy: -2.0 }).await.unwrap();
@@ -842,7 +953,7 @@ mod tests {
     async fn events_not_forwarded_without_active_client() {
         let (clients, mut client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::Key { keycode: 65, pressed: true, modifiers: Modifiers::default() }).await.unwrap();
         tx.send(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }).await.unwrap();
@@ -862,7 +973,7 @@ mod tests {
             clients: vec![ClientEntry { name: "mac".into(), edge: Edge::Left, offset: 0, modifier_map: Default::default() }],
         })).1;
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         drop(tx);
@@ -876,7 +987,7 @@ mod tests {
         // Client is removed from map mid-session
         let (clients, _client_rx) = connected_clients();
         let (tx, rx) = mpsc::channel(16);
-        let task = tokio::spawn(route_events(rx, clients.clone(), routing_config(), server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients.clone(), routing_config(), server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         // Enter the client
         tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -893,7 +1004,7 @@ mod tests {
         let clients = empty_clients();
         let config = routing_config();
         let (tx, rx) = mpsc::channel::<InputEvent>(16);
-        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release()));
+        let task = tokio::spawn(route_events(rx, clients, config, server_monitors(), dummy_release(), Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         drop(tx);
         task.await.unwrap().unwrap();
@@ -906,7 +1017,7 @@ mod tests {
         let (clients, _client_rx) = connected_clients();
         let (event_tx, event_rx) = mpsc::channel(16);
         let (release_tx, mut release_rx) = mpsc::channel(4);
-        let task = tokio::spawn(route_events(event_rx, clients, routing_config(), server_monitors(), release_tx));
+        let task = tokio::spawn(route_events(event_rx, clients, routing_config(), server_monitors(), release_tx, Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         // Enter client
         event_tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
@@ -928,7 +1039,7 @@ mod tests {
         })).1;
         let (event_tx, event_rx) = mpsc::channel(16);
         let (release_tx, mut release_rx) = mpsc::channel(4);
-        let task = tokio::spawn(route_events(event_rx, clients, config, server_monitors(), release_tx));
+        let task = tokio::spawn(route_events(event_rx, clients, config, server_monitors(), release_tx, Arc::new(Telemetry::default()), watch::channel(RouteSnapshot::default()).0));
 
         event_tx.send(InputEvent::MouseMoveAbs { x: 2559.0, y: 720.0 }).await.unwrap();
         drop(event_tx);

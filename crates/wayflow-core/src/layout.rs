@@ -20,6 +20,10 @@ impl ServerLayout {
         self.monitors.len()
     }
 
+    pub fn screens(&self) -> &[ScreenInfo] {
+        &self.monitors
+    }
+
     /// Rightmost pixel x of the virtual desktop at cursor y.
     /// Returns None if y is not covered by any monitor.
     pub fn right_boundary_at(&self, y: i32) -> Option<i32> {

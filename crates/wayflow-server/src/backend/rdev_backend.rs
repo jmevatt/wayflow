@@ -11,13 +11,16 @@
 // The `release_rx` parameter is received but not used here: rdev does not hold a
 // compositor-level grab, so there is nothing to release.
 
+use std::sync::Arc;
+
 use super::{CaptureBackend, InputEvent};
 use anyhow::Result;
 use rdev::{listen, Button, EventType, Key};
 use tokio::sync::mpsc;
-use tracing::warn;
 use wayflow_core::keymap::rdev_keys;
 use wayflow_proto::{Modifiers, MouseButton};
+
+use crate::telemetry::Telemetry;
 
 pub struct RdevCapture;
 
@@ -27,6 +30,7 @@ impl CaptureBackend for RdevCapture {
         tx: mpsc::Sender<InputEvent>,
         release_rx: mpsc::Receiver<()>,
         monitors_tx: tokio::sync::watch::Sender<Vec<wayflow_proto::ScreenInfo>>,
+        _telemetry: Arc<Telemetry>,
     ) -> Result<()> {
         // release_rx and monitors_tx are not used: rdev doesn't hold a compositor grab
         // and doesn't have an OS API to query monitor layout here.

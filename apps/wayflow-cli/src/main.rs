@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use wayflow_core::config::{ClientConfig, Config};
 
 #[derive(Parser)]
@@ -34,14 +34,11 @@ async fn main() -> Result<()> {
     // Must be called before any rustls usage.
     wayflow_core::tls::install_default_crypto_provider();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("WAYFLOW_LOG")
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Hold the guard for the full lifetime of main -- when it drops the
+    // background flusher thread joins and any buffered log lines are written.
+    let _log_guard = init_tracing(matches!(cli.command, Command::Server))?;
 
     match cli.command {
         Command::Server => {
@@ -76,6 +73,47 @@ async fn main() -> Result<()> {
             wayflow_client::client::run(addr, hostname()).await
         }
     }
+}
+
+/// Set up tracing with two layers: human-readable to stderr (controlled by
+/// $WAYFLOW_LOG, defaults to info) and structured JSON to a daily-rotated file
+/// in the platform cache dir (always at debug level so we have history when
+/// post-morteming).
+///
+/// Returns a WorkerGuard that MUST be held by main to flush the non-blocking
+/// file writer on shutdown.
+fn init_tracing(is_server: bool) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    let stderr_filter = EnvFilter::try_from_env("WAYFLOW_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    // Separate filter for the file -- always include debug so the rotating
+    // log has more detail than what the user normally sees on stderr.
+    let file_filter = EnvFilter::new(
+        std::env::var("WAYFLOW_LOG_FILE").unwrap_or_else(|_| "wayflow=debug,info".into()),
+    );
+
+    let log_dir = log_dir();
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("create log dir {}", log_dir.display()))?;
+    let log_basename = if is_server { "server.log" } else { "client.log" };
+
+    let appender = tracing_appender::rolling::daily(&log_dir, log_basename);
+    let (file_writer, guard) = tracing_appender::non_blocking(appender);
+
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(std::io::stderr).with_filter(stderr_filter))
+        .with(fmt::layer().json().with_writer(file_writer).with_filter(file_filter))
+        .init();
+
+    tracing::info!("logging to {}/{}.<date>", log_dir.display(), log_basename);
+    Ok(guard)
+}
+
+fn log_dir() -> std::path::PathBuf {
+    // Cache dir on linux (~/.cache/wayflow), Library/Caches on macOS.
+    // dirs::cache_dir() returns the platform default; tests rarely need this.
+    dirs::cache_dir()
+        .map(|p| p.join("wayflow"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/wayflow"))
 }
 
 fn hostname() -> String {

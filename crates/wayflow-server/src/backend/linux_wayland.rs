@@ -10,7 +10,8 @@
 //
 // GNOME >= 45 supports InputCapture (portal version 1).
 
-use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream};
+use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream, sync::Arc};
+use std::sync::atomic::Ordering;
 
 use ashpd::desktop::input_capture::Region;
 
@@ -27,6 +28,7 @@ use tracing::{debug, info, warn};
 use wayflow_proto::{Modifiers, MouseButton, ScreenInfo};
 
 use super::{CaptureBackend, InputEvent};
+use crate::telemetry::Telemetry;
 
 /// Non-blocking emit into the InputEvent pipeline. We deliberately do NOT
 /// use `await`-blocking `send` here: if `route_events` is back-pressured
@@ -34,14 +36,16 @@ use super::{CaptureBackend, InputEvent};
 /// into libei's internal buffer and EI events would be silently dropped
 /// inside libei with no log line. `try_send` makes the back-pressure
 /// observable in OUR logs, even though we still drop the event.
-fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent) {
+fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
     use mpsc::error::TrySendError;
     match tx.try_send(event) {
         Ok(()) => {}
         Err(TrySendError::Full(dropped)) => {
+            telemetry.input_events_dropped_full.fetch_add(1, Ordering::Relaxed);
             warn!("input pipeline full (256 cap reached); dropping {dropped:?}");
         }
         Err(TrySendError::Closed(_)) => {
+            telemetry.input_events_dropped_closed.fetch_add(1, Ordering::Relaxed);
             // route_events task has exited -- server is shutting down. Ignore.
         }
     }
@@ -76,12 +80,13 @@ impl CaptureBackend for LinuxWaylandCapture {
         tx: mpsc::Sender<InputEvent>,
         release_rx: mpsc::Receiver<()>,
         monitors_tx: watch::Sender<Vec<ScreenInfo>>,
+        telemetry: Arc<Telemetry>,
     ) -> Result<()> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build tokio runtime for capture")?
-            .block_on(capture_async(tx, release_rx, monitors_tx))
+            .block_on(capture_async(tx, release_rx, monitors_tx, telemetry))
     }
 }
 
@@ -93,6 +98,7 @@ async fn capture_async(
     tx: mpsc::Sender<InputEvent>,
     mut release_rx: mpsc::Receiver<()>,
     monitors_tx: watch::Sender<Vec<ScreenInfo>>,
+    telemetry: Arc<Telemetry>,
 ) -> Result<()> {
     info!("connecting to XDG InputCapture portal");
 
@@ -182,7 +188,7 @@ async fn capture_async(
                 try_emit(&tx, InputEvent::MouseMoveAbs {
                     x: pos.0 as f64,
                     y: pos.1 as f64,
-                });
+                }, &telemetry);
 
                 // Synthesize key-press events for any modifiers currently held.
                 // EI reports modifier state but does NOT replay individual key
@@ -197,7 +203,7 @@ async fn capture_async(
                             keycode: hid,
                             pressed: true,
                             modifiers,
-                        });
+                        }, &telemetry);
                     }
                 }
 
@@ -224,7 +230,7 @@ async fn capture_async(
                         keycode: hid,
                         pressed: false,
                         modifiers: Modifiers::default(),
-                    });
+                    }, &telemetry);
                 }
                 active = None;
             }
@@ -233,7 +239,7 @@ async fn capture_async(
                 match ei_result {
                     Err(e) => { warn!("EI stream error: {e:?}"); break; }
                     Ok(event) => {
-                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut held_keys, &mut scroll_remainder).await;
+                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut held_keys, &mut scroll_remainder, &telemetry).await;
                     }
                 }
             }
@@ -289,6 +295,7 @@ async fn handle_ei_event(
     modifiers: &mut Modifiers,
     held_keys: &mut std::collections::HashSet<u32>,
     scroll_remainder: &mut (f64, f64),
+    telemetry: &Telemetry,
 ) {
     match event {
         EiEvent::SeatAdded(evt) => {
@@ -310,14 +317,14 @@ async fn handle_ei_event(
             try_emit(tx, InputEvent::MouseMoveAbs {
                 x: state.cursor_pos.0,
                 y: state.cursor_pos.1,
-            });
+            }, telemetry);
         }
 
         EiEvent::Button(evt) if active.is_some() => {
             use reis::ei::button::ButtonState;
             let button = evdev_to_mouse_button(evt.button);
             let pressed = evt.state == ButtonState::Press;
-            try_emit(tx, InputEvent::MouseButton { button, pressed });
+            try_emit(tx, InputEvent::MouseButton { button, pressed }, telemetry);
         }
 
         EiEvent::ScrollDelta(evt) if active.is_some() => {
@@ -332,7 +339,7 @@ async fn handle_ei_event(
             scroll_remainder.0 -= ix;
             scroll_remainder.1 -= iy;
             if ix != 0.0 || iy != 0.0 {
-                try_emit(tx, InputEvent::Scroll { dx: ix, dy: iy });
+                try_emit(tx, InputEvent::Scroll { dx: ix, dy: iy }, telemetry);
             }
         }
 
@@ -341,7 +348,7 @@ async fn handle_ei_event(
             // Negate because EI direction is opposite to rdev/CGEvent conventions.
             let dx = -(evt.discrete_dx as f64) / 120.0;
             let dy = -(evt.discrete_dy as f64) / 120.0;
-            try_emit(tx, InputEvent::Scroll { dx, dy });
+            try_emit(tx, InputEvent::Scroll { dx, dy }, telemetry);
         }
 
         EiEvent::KeyboardKey(evt) if active.is_some() => {
@@ -349,7 +356,7 @@ async fn handle_ei_event(
             if let Some(hid) = wayflow_core::keymap::evdev::evdev_to_hid(evt.key) {
                 let pressed = evt.state == KeyState::Press;
                 if pressed { held_keys.insert(hid); } else { held_keys.remove(&hid); }
-                try_emit(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers });
+                try_emit(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers }, telemetry);
             } else {
                 debug!("evdev key {} has no HID mapping, skipping", evt.key);
             }

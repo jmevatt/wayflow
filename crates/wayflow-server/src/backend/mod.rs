@@ -7,9 +7,13 @@
 // server side, so the backend can release any compositor-level grab it holds
 // (e.g. InputCapture portal on Wayland).
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use wayflow_proto::{MouseButton, Modifiers, ScreenInfo};
+
+use crate::telemetry::Telemetry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
@@ -33,6 +37,7 @@ pub trait CaptureBackend: Send + 'static {
         tx: mpsc::Sender<InputEvent>,
         release_rx: mpsc::Receiver<()>,
         monitors_tx: watch::Sender<Vec<ScreenInfo>>,
+        telemetry: Arc<Telemetry>,
     ) -> Result<()>;
 }
 
@@ -51,15 +56,16 @@ pub fn start_capture(
     tx: mpsc::Sender<InputEvent>,
     release_rx: mpsc::Receiver<()>,
     monitors_tx: watch::Sender<Vec<ScreenInfo>>,
+    telemetry: Arc<Telemetry>,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
-    return linux_wayland::backend().start(tx, release_rx, monitors_tx);
+    return linux_wayland::backend().start(tx, release_rx, monitors_tx, telemetry);
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return rdev_backend::backend().start(tx, release_rx, monitors_tx);
+    return rdev_backend::backend().start(tx, release_rx, monitors_tx, telemetry);
 
     #[allow(unreachable_code)]
-    { let _ = (tx, release_rx, monitors_tx); Err(anyhow::anyhow!("no capture backend for this platform")) }
+    { let _ = (tx, release_rx, monitors_tx, telemetry); Err(anyhow::anyhow!("no capture backend for this platform")) }
 }
 
 #[cfg(test)]
