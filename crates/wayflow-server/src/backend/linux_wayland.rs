@@ -47,6 +47,27 @@ fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent) {
     }
 }
 
+/// HID usage codes for the standard modifier keys (left-side variants).
+/// EI's `KeyboardModifiers` event reports a state bitmap (shift/ctrl/alt/meta)
+/// without telling us which physical key is depressed; we always pick the
+/// left variant for synthesis. Either left or right releases the modifier
+/// flag at the macOS Window Server, so the choice is benign.
+const HID_LEFT_CTRL:  u32 = 0xE0;
+const HID_LEFT_SHIFT: u32 = 0xE1;
+const HID_LEFT_ALT:   u32 = 0xE2;
+const HID_LEFT_META:  u32 = 0xE3;
+
+fn modifier_hid_codes(mods: Modifiers) -> impl Iterator<Item = u32> {
+    [
+        mods.shift.then_some(HID_LEFT_SHIFT),
+        mods.ctrl.then_some(HID_LEFT_CTRL),
+        mods.alt.then_some(HID_LEFT_ALT),
+        mods.meta.then_some(HID_LEFT_META),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 pub struct LinuxWaylandCapture;
 
 impl CaptureBackend for LinuxWaylandCapture {
@@ -143,6 +164,12 @@ async fn capture_async(
     let mut active: Option<ActivationState> = None;
     let mut modifiers = Modifiers::default();
     let mut scroll_remainder = (0.0_f64, 0.0_f64);
+    // Keys currently held according to EI events we've forwarded to route_events,
+    // *plus* any modifiers we've synthesized at activation. Used to flush
+    // synthetic release events on deactivation so the client never gets stuck
+    // modifiers when the compositor unilaterally deactivates capture or when
+    // a select! race processes Deactivated before a trailing key-release event.
+    let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -157,6 +184,23 @@ async fn capture_async(
                     y: pos.1 as f64,
                 });
 
+                // Synthesize key-press events for any modifiers currently held.
+                // EI reports modifier state but does NOT replay individual key
+                // presses for already-held keys at activation -- without this
+                // synthesis the client would never see the press, and
+                // shift/ctrl/alt/meta combos formed by holding a modifier
+                // before crossing the screen edge would silently drop the modifier.
+                for hid in modifier_hid_codes(modifiers) {
+                    if held_keys.insert(hid) {
+                        debug!("synth modifier press at activation: {hid:#x}");
+                        try_emit(&tx, InputEvent::Key {
+                            keycode: hid,
+                            pressed: true,
+                            modifiers,
+                        });
+                    }
+                }
+
                 let pos_f64 = (pos.0 as f64, pos.1 as f64);
                 active = Some(ActivationState {
                     activation_id,
@@ -168,6 +212,20 @@ async fn capture_async(
 
             Some(_) = deactivated_stream.next() => {
                 debug!("capture deactivated by compositor");
+                // Flush synthetic releases for every key we believe is held.
+                // Catches the select! race where a trailing key-release EI
+                // event would otherwise be dropped because `active` flipped
+                // to None first; also catches the unilateral compositor
+                // deactivation case where `route_events` doesn't get a
+                // mouse-cross to trigger its own held_keys flush.
+                for hid in held_keys.drain() {
+                    debug!("synth release at deactivation: {hid:#x}");
+                    try_emit(&tx, InputEvent::Key {
+                        keycode: hid,
+                        pressed: false,
+                        modifiers: Modifiers::default(),
+                    });
+                }
                 active = None;
             }
 
@@ -175,7 +233,7 @@ async fn capture_async(
                 match ei_result {
                     Err(e) => { warn!("EI stream error: {e:?}"); break; }
                     Ok(event) => {
-                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut scroll_remainder).await;
+                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut held_keys, &mut scroll_remainder).await;
                     }
                 }
             }
@@ -229,6 +287,7 @@ async fn handle_ei_event(
     context: &ei::Context,
     active: &mut Option<ActivationState>,
     modifiers: &mut Modifiers,
+    held_keys: &mut std::collections::HashSet<u32>,
     scroll_remainder: &mut (f64, f64),
 ) {
     match event {
@@ -289,6 +348,7 @@ async fn handle_ei_event(
             use reis::ei::keyboard::KeyState;
             if let Some(hid) = wayflow_core::keymap::evdev::evdev_to_hid(evt.key) {
                 let pressed = evt.state == KeyState::Press;
+                if pressed { held_keys.insert(hid); } else { held_keys.remove(&hid); }
                 try_emit(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers });
             } else {
                 debug!("evdev key {} has no HID mapping, skipping", evt.key);
