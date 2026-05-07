@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Wayflow
+GenericName=Keyboard and Mouse Sharing
+Comment=Tray supervisor for the Wayflow KVM-over-network agent
+Exec=/usr/bin/wayflow tray
+Icon=wayflow
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=false
+# When dropped into /etc/xdg/autostart/ this runs at login. Users who
+# don't want the tray autostarted can copy to ~/.config/autostart/ and
+# add: Hidden=true.
+X-GNOME-Autostart-enabled=true

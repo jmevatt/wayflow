@@ -57,3 +57,20 @@ info-plist-path        = "../../crates/wayflow-tray/macos/Info.plist"
 # Producing notarized DMGs is a separate batch -- requires Apple Developer
 # ID + notarytool credentials. For now, builds are unsigned (users will
 # need to right-click -> Open the first time, or run `xattr -d com.apple.quarantine`).
+
+# Linux .deb. The systemd --user units are bundled into
+# /usr/lib/systemd/user/ so any user on the box can enable them with
+# `systemctl --user enable --now wayflow-server` (no root needed). The
+# .desktop file lands in /usr/share/applications/ for app-launcher
+# discovery; users who want the tray to auto-start at login symlink
+# it into ~/.config/autostart/ themselves (deliberately opt-in -- a
+# system-wide /etc/xdg/autostart entry would force-autostart for
+# every user on the machine, which is too aggressive for a KVM agent).
+[package.metadata.packager.deb]
+section  = "net"
+priority = "optional"
+
+[package.metadata.packager.deb.files]
+"/usr/lib/systemd/user/wayflow-server.service"   = "../../packaging/systemd/wayflow-server.service"
+"/usr/lib/systemd/user/wayflow-client@.service"  = "../../packaging/systemd/wayflow-client@.service"
+"/usr/share/applications/wayflow.desktop"         = "../../packaging/linux/wayflow.desktop"
