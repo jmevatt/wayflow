@@ -556,7 +556,20 @@ async fn serve(
                             )
                             .await
                         {
-                            warn!("{peer} error: {e:#}");
+                            // Demote pre-handshake transport errors (TLS EOFs,
+                            // connection resets, etc.) to debug -- random
+                            // probes on 24800 (port scanners, abandoned
+                            // deskflow processes, mDNS) all show up here and
+                            // would otherwise spam WARN every reconnect cycle.
+                            // Application-level errors (version mismatch,
+                            // unknown client, malformed Hello) keep WARN
+                            // because they signal real configuration issues
+                            // an operator needs to see.
+                            if is_transport_noise(&e) {
+                                debug!("{peer} pre-handshake disconnect: {e:#}");
+                            } else {
+                                warn!("{peer} error: {e:#}");
+                            }
                         }
                     });
                 }
@@ -567,6 +580,18 @@ async fn serve(
             }
         }
     }
+}
+
+/// Walk the anyhow error chain and report whether the root cause is an
+/// `io::Error` (TCP-level error: connection reset, broken pipe, EOF) or a
+/// rustls error wrapped as io. Those happen for every random probe that
+/// hits port 24800 without speaking our protocol -- not worth a WARN per
+/// reconnect cycle. `bail!` errors raised by handle_stream (version
+/// mismatch, unknown client name, etc.) don't have an io::Error in their
+/// chain and stay at WARN so misconfigurations remain visible.
+fn is_transport_noise(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|src| src.downcast_ref::<std::io::Error>().is_some())
 }
 
 async fn handle_connection(
