@@ -26,12 +26,28 @@ mod platform {
             let mut last_seen: Option<ClipboardContent> = None;
 
             loop {
-                while let Ok(content) = apply_rx.try_recv() {
-                    if let Err(e) = set_clipboard(&mut clipboard, &content) {
-                        warn!("clipboard apply failed: {e}");
-                    } else {
-                        last_seen = Some(content);
+                let mut closed = false;
+                loop {
+                    match apply_rx.try_recv() {
+                        Ok(content) => {
+                            if let Err(e) = set_clipboard(&mut clipboard, &content) {
+                                warn!("clipboard apply failed: {e}");
+                            } else {
+                                last_seen = Some(content);
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            closed = true;
+                            break;
+                        }
                     }
+                }
+                // event_loop drops apply_tx when the connection ends; that's
+                // our signal to release outbound (a write_tx clone) and let
+                // writer_task drain so the reconnect loop can proceed.
+                if closed {
+                    break;
                 }
 
                 if let Some(content) = snapshot(&mut clipboard) {

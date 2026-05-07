@@ -183,8 +183,18 @@ where
         }
     }
 
+    // Order matters: the clipboard thread (clipboard::start) holds a
+    // write_tx clone, so dropping our own write_tx isn't enough to let
+    // writer_task's rx.recv() return None. Drop the apply_tx first to
+    // signal the clipboard thread to exit on its next poll iteration,
+    // then abort write_task directly so reconnect doesn't have to wait
+    // for the clipboard's 750ms sleep cycle. Without this, server
+    // disconnect deadlocks the cleanup and the run() reconnect loop
+    // never iterates -- the client appears to hang on disconnect.
+    drop(clipboard_apply_tx);
     drop(write_tx);
     read_task.abort();
+    write_task.abort();
     let _ = write_task.await;
     let _ = read_task.await;
     result
