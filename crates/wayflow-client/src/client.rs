@@ -7,8 +7,8 @@
 
 use anyhow::{bail, Result};
 use rustls::pki_types::ServerName;
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::BTreeSet, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_rustls::TlsConnector;
@@ -132,13 +132,14 @@ where
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     poll.tick().await; // first tick fires immediately -- consume it
     let mut last_size = backend.screen_size();
+    let mut pressed_keys = BTreeSet::new();
 
-    let result: Result<()> = loop {
+    let mut result: Result<()> = loop {
         tokio::select! {
             msg = read_rx.recv() => {
                 match msg {
                     Some(Ok(s2c)) => {
-                        match handle_msg(s2c, backend, &write_tx).await {
+                        match handle_msg(s2c, backend, &write_tx, &mut pressed_keys).await {
                             Ok(true) => continue,
                             Ok(false) => break Ok(()),
                             Err(e) => break Err(e),
@@ -169,6 +170,14 @@ where
             }
         }
     };
+
+    if let Err(e) = release_pressed_keys(backend, &mut pressed_keys, "event loop exit") {
+        if result.is_ok() {
+            result = Err(e);
+        } else {
+            warn!("failed to release pressed keys during shutdown: {e:#}");
+        }
+    }
 
     drop(write_tx);
     read_task.abort();
@@ -201,6 +210,7 @@ async fn handle_msg(
     msg: S2C,
     backend: &mut dyn InjectBackend,
     write_tx: &mpsc::Sender<C2S>,
+    pressed_keys: &mut BTreeSet<u32>,
 ) -> Result<bool> {
     match msg {
         S2C::EnterScreen { x, y } => {
@@ -208,7 +218,10 @@ async fn handle_msg(
             backend.wake_display()?;
             backend.move_abs(x, y)?;
         }
-        S2C::LeaveScreen => info!("leaving screen"),
+        S2C::LeaveScreen => {
+            info!("leaving screen");
+            release_pressed_keys(backend, pressed_keys, "LeaveScreen")?;
+        }
         S2C::MouseMoveAbs { x, y } => {
             backend.wake_display()?;
             backend.move_abs(x, y)?;
@@ -227,7 +240,12 @@ async fn handle_msg(
             modifiers,
         } => {
             backend.wake_display()?;
-            backend.key_event(keycode, pressed, modifiers)?
+            backend.key_event(keycode, pressed, modifiers)?;
+            if pressed {
+                pressed_keys.insert(keycode);
+            } else {
+                pressed_keys.remove(&keycode);
+            }
         }
         S2C::ClipboardData(_) => {
             // TODO: write to local clipboard via smithay-clipboard / arboard
@@ -242,6 +260,27 @@ async fn handle_msg(
         S2C::Hello(_) => bail!("unexpected second Hello from server -- protocol error"),
     }
     Ok(true)
+}
+
+fn release_pressed_keys(
+    backend: &mut dyn InjectBackend,
+    pressed_keys: &mut BTreeSet<u32>,
+    reason: &'static str,
+) -> Result<()> {
+    if pressed_keys.is_empty() {
+        return Ok(());
+    }
+
+    let keys: Vec<u32> = pressed_keys.iter().copied().collect();
+    info!(
+        "releasing {} pressed key(s) on {reason}",
+        pressed_keys.len()
+    );
+    for keycode in keys {
+        backend.key_event(keycode, false, wayflow_proto::Modifiers::default())?;
+    }
+    pressed_keys.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -359,6 +398,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leave_screen_releases_pressed_keys() {
+        let (mut server_side, client_side) = duplex(65536);
+        let (client_r, client_w) = split(client_side);
+
+        transport::send_s2c(
+            &mut server_side,
+            &S2C::KeyEvent {
+                keycode: 0xE1,
+                pressed: true,
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        transport::send_s2c(&mut server_side, &S2C::LeaveScreen)
+            .await
+            .unwrap();
+        drop(server_side);
+
+        let (mut backend, calls) = MockBackend::new();
+        event_loop(client_r, client_w, &mut backend, "test")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![
+                Call::WakeDisplay,
+                Call::KeyEvent(0xE1, true),
+                Call::KeyEvent(0xE1, false)
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn mouse_move_abs_calls_move_abs() {
         let calls = run_with_msg(S2C::MouseMoveAbs { x: 640, y: 480 }).await;
         assert_eq!(calls, vec![Call::WakeDisplay, Call::MoveAbs(640, 480)]);
@@ -394,7 +471,35 @@ mod tests {
             modifiers: Modifiers::default(),
         })
         .await;
-        assert_eq!(calls, vec![Call::WakeDisplay, Call::KeyEvent(65, true)]);
+        assert_eq!(
+            calls,
+            vec![
+                Call::WakeDisplay,
+                Call::KeyEvent(65, true),
+                Call::KeyEvent(65, false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_releases_pressed_keys() {
+        let calls = run_with_msg(S2C::KeyEvent {
+            keycode: 0xE1,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        })
+        .await;
+        assert_eq!(
+            calls,
+            vec![
+                Call::WakeDisplay,
+                Call::KeyEvent(0xE1, true),
+                Call::KeyEvent(0xE1, false)
+            ]
+        );
     }
 
     #[tokio::test]
