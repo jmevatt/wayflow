@@ -35,7 +35,23 @@
 
             # For nested compositor testing
             weston
+
+            # Tray icon (libappindicator + gtk3) for wayflow-tray on Linux.
+            # gtk3 + ayatana-appindicator is the StatusNotifierItem stack
+            # consumed by the GNOME AppIndicator extension, KDE, waybar, etc.
+            gtk3
+            glib
+            cairo
+            pango
+            atk
+            gdk-pixbuf
+            libayatana-appindicator
+            xdotool   # libxdo, transitive dep of tray-icon
           ];
+          # libayatana-appindicator is dlopen'd by tray-icon at runtime.
+          LD_LIBRARY_PATH = nixpkgs.lib.makeLibraryPath (with pkgs; [
+            libayatana-appindicator
+          ]);
           shellHook = ''
             export RUST_LOG=wayflow=debug
             alias wf-test='weston --socket=wayland-test &'

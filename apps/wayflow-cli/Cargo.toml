@@ -15,6 +15,7 @@ path = "src/main.rs"
 wayflow-core   = { workspace = true }
 wayflow-server = { workspace = true }
 wayflow-client = { workspace = true }
+wayflow-tray   = { workspace = true }
 
 tokio   = { workspace = true }
 anyhow  = { workspace = true }

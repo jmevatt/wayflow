@@ -1,0 +1,18 @@
+[package]
+name        = "wayflow-tray"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+
+[dependencies]
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
+dirs           = { workspace = true }
+open           = { workspace = true }
+
+tray-icon      = { workspace = true }
+tao            = { workspace = true }
+
+wayflow-core   = { workspace = true }

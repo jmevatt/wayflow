@@ -4,6 +4,7 @@ members = [
     "crates/wayflow-core",
     "crates/wayflow-server",
     "crates/wayflow-client",
+    "crates/wayflow-tray",
     "apps/wayflow-cli",
 ]
 resolver = "2"
@@ -49,8 +50,15 @@ libc = "0.2"
 # testing
 tempfile = "3"
 
+# tray UI -- minimal: tao for cross-platform event loop, tray-icon for the icon.
+# No GL, no fonts, no eframe -- intentionally tiny.
+tray-icon = "0.20"
+tao       = "0.30"
+open      = "5"
+
 # internal
 wayflow-proto  = { path = "crates/wayflow-proto" }
 wayflow-core   = { path = "crates/wayflow-core" }
 wayflow-server = { path = "crates/wayflow-server" }
 wayflow-client = { path = "crates/wayflow-client" }
+wayflow-tray   = { path = "crates/wayflow-tray" }

@@ -135,6 +135,14 @@ impl ClientConfig {
         Ok(toml::from_str(&text)?)
     }
 
+    pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
     pub fn server_addr(&self) -> String {
         format!("{}:{}", self.server, self.port)
     }

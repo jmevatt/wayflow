@@ -58,9 +58,15 @@ WAYFLOW_LOG=debug wayflow server
 
 # On the machine to be controlled (client mode):
 WAYFLOW_LOG=debug wayflow client --server 192.168.1.x
+
+# Tray UI: menu-bar/system-tray icon that supervises a wayflow server or client.
+# Single binary, same on Linux/macOS/Windows.
+wayflow tray
 ```
 
 On macOS, the client will prompt for Accessibility permission the first time it injects input. Grant it in System Settings -> Privacy & Security -> Accessibility.
+
+The tray app is a tiny supervisor: pick `Start server` or `Start client` from the menu, and it spawns the right `wayflow` subcommand as a child. Status, edit-config-in-`$EDITOR`, and quit also live in the menu. To make a proper menu-bar app on macOS (no dock icon), wrap the binary with `./scripts/bundle-mac.sh` and `open target/Wayflow.app`. On Linux you need a status bar that hosts StatusNotifierItem (KDE/GNOME-with-AppIndicator/waybar with `tray` module).
 
 ---
 
