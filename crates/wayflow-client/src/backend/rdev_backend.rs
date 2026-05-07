@@ -23,9 +23,7 @@ pub struct RdevInject {
     /// (drives word + line selection in text fields). Without it every press
     /// looks like a single click and triple-click does nothing.
     #[cfg(target_os = "macos")]
-    last_press: Option<(MouseButton, std::time::Instant)>,
-    #[cfg(target_os = "macos")]
-    click_count: i64,
+    click_tracker: ClickTracker,
     #[cfg(target_os = "macos")]
     wake_display_supported: bool,
     /// macOS: set of HID keycodes the client believes are currently held.
@@ -47,8 +45,7 @@ impl RdevInject {
                 right_down: false,
                 display_origin: origin,
                 display_size: size,
-                last_press: None,
-                click_count: 0,
+                click_tracker: ClickTracker::default(),
                 wake_display_supported: true,
                 mac_pressed_keys: std::collections::HashSet::new(),
             });
@@ -67,6 +64,66 @@ impl RdevInject {
 /// later if precision matters.
 #[cfg(target_os = "macos")]
 const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// macOS multi-click spatial threshold. Two presses within `DOUBLE_CLICK_WINDOW`
+/// are only treated as a multi-click if the cursor stayed within this many
+/// pixels of the previous press. Without this check, "click app A, click app B
+/// in another window" gets `click_state=2` and the OS interprets the second
+/// click as a double-click on whatever is under the cursor (word selection in
+/// text fields, minimize on title bars, etc). 5px matches deskflow / synergy
+/// and the macOS system default click box.
+#[cfg(target_os = "macos")]
+const MULTI_CLICK_BOX_PX: f64 = 5.0;
+
+/// Tracks consecutive presses on the same button to compute the value
+/// macOS expects in `kCGMouseEventClickState` (1 = single, 2 = double,
+/// 3 = triple). Two presses count as part of the same multi-click if:
+///   1. same button, AND
+///   2. within `DOUBLE_CLICK_WINDOW`, AND
+///   3. cursor stayed within `MULTI_CLICK_BOX_PX` of the previous press.
+/// Otherwise the count resets to 1. After 3 the count wraps to 1, mirroring
+/// how the system handles a 4th rapid click as a fresh single-click sequence.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct ClickTracker {
+    last: Option<ClickState>,
+}
+
+#[cfg(target_os = "macos")]
+struct ClickState {
+    button: MouseButton,
+    time: std::time::Instant,
+    pos: (f64, f64),
+    count: i64,
+}
+
+#[cfg(target_os = "macos")]
+impl ClickTracker {
+    fn next_count(
+        &mut self,
+        button: MouseButton,
+        now: std::time::Instant,
+        pos: (f64, f64),
+    ) -> i64 {
+        let count = match &self.last {
+            Some(s)
+                if s.button == button
+                    && now.saturating_duration_since(s.time) < DOUBLE_CLICK_WINDOW
+                    && (s.pos.0 - pos.0).abs() <= MULTI_CLICK_BOX_PX
+                    && (s.pos.1 - pos.1).abs() <= MULTI_CLICK_BOX_PX =>
+            {
+                if s.count >= 3 { 1 } else { s.count + 1 }
+            }
+            _ => 1,
+        };
+        self.last = Some(ClickState { button, time: now, pos, count });
+        count
+    }
+
+    fn current_count(&self) -> i64 {
+        self.last.as_ref().map_or(1, |s| s.count)
+    }
+}
 
 /// Compute the union bounding rectangle of all active macOS displays.
 /// Returns (origin (top-left in CG global coords), (width, height)).
@@ -173,24 +230,23 @@ impl InjectBackend for RdevInject {
         // registering" after extended use.
         #[cfg(target_os = "macos")]
         {
-            // Update click count on press; release reuses whatever count is
-            // current. macOS expects click_state=1/2/3 on each Down event
-            // for single/double/triple clicks; omitting it makes triple-click
+            // macOS expects click_state=1/2/3 on each Down event for
+            // single/double/triple clicks; omitting it makes triple-click
             // text selection (word/sentence/paragraph) silently no-op.
-            if pressed {
-                let now = std::time::Instant::now();
-                self.click_count = match self.last_press {
-                    Some((prev_btn, prev_ts))
-                        if prev_btn == button
-                            && now.duration_since(prev_ts) < DOUBLE_CLICK_WINDOW =>
-                    {
-                        (self.click_count + 1).min(3)
-                    }
-                    _ => 1,
-                };
-                self.last_press = Some((button, now));
-            }
-            return mouse_button_macos(button, pressed, self.click_count);
+            // Down: advance the tracker (which checks button + time + spatial
+            // box). Up: reuse the count from the most recent Down so the
+            // matching mouseUp carries the same click_state.
+            let cursor = mac_cursor_pos()?;
+            let click_state = if pressed {
+                self.click_tracker.next_count(
+                    button,
+                    std::time::Instant::now(),
+                    (cursor.x, cursor.y),
+                )
+            } else {
+                self.click_tracker.current_count()
+            };
+            return mouse_button_macos(button, pressed, click_state, cursor);
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -466,10 +522,13 @@ fn key_event_macos(cg_keycode: u16, pressed: bool, flags_bits: u64) -> Result<()
 /// 1 for a single click, 2 for the press+release of a double click, 3 for
 /// triple. Set on both Down and Up events of the same multi-click sequence.
 #[cfg(target_os = "macos")]
-fn mouse_button_macos(button: MouseButton, pressed: bool, click_state: i64) -> Result<()> {
-    use core_graphics::event::{
-        CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-    };
+fn mouse_button_macos(
+    button: MouseButton,
+    pressed: bool,
+    click_state: i64,
+    cursor: core_graphics::geometry::CGPoint,
+) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let (etype, btn) = match (button, pressed) {
@@ -493,15 +552,24 @@ fn mouse_button_macos(button: MouseButton, pressed: bool, click_state: i64) -> R
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
-    // CGEventCreate(NULL) returns a "null event" whose location is the current cursor.
-    let cursor = CGEvent::new(source.clone())
-        .map(|e| e.location())
-        .map_err(|_| anyhow::anyhow!("CGEvent::new failed"))?;
     let event = CGEvent::new_mouse_event(source, etype, cursor, btn)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event failed"))?;
     event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
     event.post(CGEventTapLocation::HID);
     Ok(())
+}
+
+/// Read the current cursor position via a "null" CGEvent. CGEventCreate(NULL)
+/// returns an event whose `location` is the live HID cursor position.
+#[cfg(target_os = "macos")]
+fn mac_cursor_pos() -> Result<core_graphics::geometry::CGPoint> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
+    CGEvent::new(source)
+        .map(|e| e.location())
+        .map_err(|_| anyhow::anyhow!("CGEvent::new failed"))
 }
 
 /// Post a mouse move (or drag) CGEvent with the correct event type for the current button state.
@@ -612,5 +680,97 @@ mod tests {
         // HID 0x04 = KeyA -- must be in the map
         assert!(b.key_event(0x04, true, Modifiers::default()).is_ok());
         assert!(b.key_event(0x04, false, Modifiers::default()).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    mod click_tracker {
+        use super::super::{ClickTracker, DOUBLE_CLICK_WINDOW};
+        use std::time::{Duration, Instant};
+        use wayflow_proto::MouseButton;
+
+        fn at(t: Instant, ms: u64) -> Instant {
+            t + Duration::from_millis(ms)
+        }
+
+        #[test]
+        fn first_press_is_count_one() {
+            let mut t = ClickTracker::default();
+            let now = Instant::now();
+            assert_eq!(t.next_count(MouseButton::Left, now, (100.0, 100.0)), 1);
+        }
+
+        #[test]
+        fn rapid_same_pos_advances_to_double_then_triple() {
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            assert_eq!(t.next_count(MouseButton::Left, t0, (100.0, 100.0)), 1);
+            assert_eq!(t.next_count(MouseButton::Left, at(t0, 100), (100.0, 100.0)), 2);
+            assert_eq!(t.next_count(MouseButton::Left, at(t0, 200), (100.0, 100.0)), 3);
+        }
+
+        #[test]
+        fn fourth_rapid_click_wraps_to_one() {
+            // macOS treats a 4th rapid click as a fresh single-click sequence,
+            // not a sticky "still triple". Cap-at-3 was the previous bug.
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            t.next_count(MouseButton::Left, t0, (0.0, 0.0));
+            t.next_count(MouseButton::Left, at(t0, 100), (0.0, 0.0));
+            t.next_count(MouseButton::Left, at(t0, 200), (0.0, 0.0));
+            assert_eq!(t.next_count(MouseButton::Left, at(t0, 300), (0.0, 0.0)), 1);
+        }
+
+        #[test]
+        fn out_of_box_resets_to_one() {
+            // Two rapid clicks at different screen positions are NOT a
+            // double-click. This is the "click app A then click app B"
+            // misfire scenario.
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            assert_eq!(t.next_count(MouseButton::Left, t0, (100.0, 100.0)), 1);
+            assert_eq!(t.next_count(MouseButton::Left, at(t0, 50), (200.0, 100.0)), 1);
+        }
+
+        #[test]
+        fn just_inside_box_still_advances() {
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            t.next_count(MouseButton::Left, t0, (100.0, 100.0));
+            // 5px on each axis is the boundary -- inclusive.
+            assert_eq!(t.next_count(MouseButton::Left, at(t0, 100), (105.0, 95.0)), 2);
+        }
+
+        #[test]
+        fn outside_window_resets_to_one() {
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            t.next_count(MouseButton::Left, t0, (0.0, 0.0));
+            let after = t0 + DOUBLE_CLICK_WINDOW + Duration::from_millis(1);
+            assert_eq!(t.next_count(MouseButton::Left, after, (0.0, 0.0)), 1);
+        }
+
+        #[test]
+        fn different_button_resets_to_one() {
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            t.next_count(MouseButton::Left, t0, (0.0, 0.0));
+            assert_eq!(t.next_count(MouseButton::Right, at(t0, 100), (0.0, 0.0)), 1);
+        }
+
+        #[test]
+        fn current_count_returns_last_count_for_release() {
+            let mut t = ClickTracker::default();
+            let t0 = Instant::now();
+            t.next_count(MouseButton::Left, t0, (0.0, 0.0));
+            t.next_count(MouseButton::Left, at(t0, 100), (0.0, 0.0));
+            // mouseUp should carry the same click_state as the matching mouseDown.
+            assert_eq!(t.current_count(), 2);
+        }
+
+        #[test]
+        fn current_count_before_any_press_is_one() {
+            let t = ClickTracker::default();
+            assert_eq!(t.current_count(), 1);
+        }
     }
 }
