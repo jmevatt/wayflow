@@ -33,6 +33,7 @@ rcgen          = "0.13"
 # error handling
 thiserror      = "2"
 anyhow         = "1"
+arboard        = { version = "3", features = ["wayland-data-control"] }
 
 # logging
 tracing            = "0.1"

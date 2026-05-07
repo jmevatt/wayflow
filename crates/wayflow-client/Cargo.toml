@@ -37,7 +37,7 @@ core-graphics = { version = "0.19", features = ["highsierra"] }
 # Cross-platform clipboard (X11, macOS, Windows)
 # Wayland clipboard is handled via smithay-clipboard (Linux only).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-arboard = "3"
+arboard = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies.smithay-clipboard]
 version = "0.7"

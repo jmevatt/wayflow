@@ -22,7 +22,7 @@ use wayflow_core::{
     layout::{map_to_client, ServerLayout},
     tls, transport,
 };
-use wayflow_proto::{HelloS2C, ScreenInfo, C2S, PROTOCOL_VERSION, S2C};
+use wayflow_proto::{ClipboardContent, HelloS2C, ScreenInfo, C2S, PROTOCOL_VERSION, S2C};
 
 use crate::backend::InputEvent;
 use crate::telemetry::{RouteSnapshot, Telemetry};
@@ -92,6 +92,8 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     // /tmp/wayflow-server-state.json on demand.
     let telemetry = Arc::new(Telemetry::default());
     let (snap_tx, snap_rx) = watch::channel(RouteSnapshot::default());
+    let (clipboard_tx, clipboard_rx) = mpsc::channel::<ClipboardContent>(16);
+    let clipboard_apply_tx = crate::clipboard::start(clipboard_tx);
 
     tokio::spawn(watch_config(config_path, config_tx));
     tokio::spawn(state_dump_handler(
@@ -131,7 +133,15 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
         }
     });
 
-    serve(Arc::new(config), listener, acceptor, clients).await
+    serve(
+        Arc::new(config),
+        listener,
+        acceptor,
+        clients,
+        clipboard_rx,
+        Some(clipboard_apply_tx),
+    )
+    .await
 }
 
 /// SIGUSR1-triggered state dump. Writes a JSON snapshot of route_events
@@ -523,21 +533,38 @@ async fn serve(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     clients: Clients,
+    mut clipboard_rx: mpsc::Receiver<ClipboardContent>,
+    clipboard_apply_tx: Option<mpsc::Sender<ClipboardContent>>,
 ) -> Result<()> {
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let acceptor = acceptor.clone();
-                let clients = clients.clone();
-                let config = config.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, peer, acceptor, clients, config).await
-                    {
-                        warn!("{peer} error: {e:#}");
-                    }
-                });
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    let acceptor = acceptor.clone();
+                    let clients = clients.clone();
+                    let config = config.clone();
+                    let clipboard_apply_tx = clipboard_apply_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            handle_connection(
+                                stream,
+                                peer,
+                                acceptor,
+                                clients,
+                                config,
+                                clipboard_apply_tx,
+                            )
+                            .await
+                        {
+                            warn!("{peer} error: {e:#}");
+                        }
+                    });
+                }
+                Err(e) => warn!("accept error: {e}"),
+            },
+            Some(content) = clipboard_rx.recv() => {
+                broadcast_clipboard(&clients, &content, None).await;
             }
-            Err(e) => warn!("accept error: {e}"),
         }
     }
 }
@@ -548,6 +575,7 @@ async fn handle_connection(
     acceptor: TlsAcceptor,
     clients: Clients,
     config: Arc<Config>,
+    clipboard_apply_tx: Option<mpsc::Sender<ClipboardContent>>,
 ) -> Result<()> {
     // Disable Nagle so small frames (Ping, EnterScreen, single key events) hit the wire
     // immediately. Coalescing them under load is fine; coalescing them when they're the
@@ -556,7 +584,7 @@ async fn handle_connection(
     stream.set_nodelay(true)?;
     let tls = acceptor.accept(stream).await?;
     let (r, w) = tokio::io::split(tls);
-    handle_stream(r, w, peer, clients, config).await
+    handle_stream(r, w, peer, clients, config, clipboard_apply_tx).await
 }
 
 async fn handle_stream<R, W>(
@@ -565,6 +593,7 @@ async fn handle_stream<R, W>(
     peer: SocketAddr,
     clients: Clients,
     config: Arc<Config>,
+    clipboard_apply_tx: Option<mpsc::Sender<ClipboardContent>>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -662,12 +691,12 @@ where
             Ok(C2S::Pong) => debug!("pong from {name}"),
             Ok(C2S::ClipboardData(content)) => {
                 info!("clipboard update from {name}");
-                let map = clients.read().await;
-                for (peer_name, (_, peer_tx)) in map.iter() {
-                    if peer_name != &name {
-                        let _ = peer_tx.send(S2C::ClipboardData(content.clone())).await;
+                if let Some(tx) = clipboard_apply_tx.as_ref() {
+                    if tx.send(content.clone()).await.is_err() {
+                        warn!("clipboard worker unavailable");
                     }
                 }
+                broadcast_clipboard(&clients, &content, Some(&name)).await;
             }
             Ok(C2S::ScreenLayoutUpdate { screens }) => {
                 if let Some(new_screen) = screens.into_iter().next() {
@@ -702,6 +731,16 @@ where
     write_task.abort();
 
     Ok(())
+}
+
+async fn broadcast_clipboard(clients: &Clients, content: &ClipboardContent, exclude: Option<&str>) {
+    let map = clients.read().await;
+    for (peer_name, (_, peer_tx)) in map.iter() {
+        if exclude == Some(peer_name.as_str()) {
+            continue;
+        }
+        let _ = peer_tx.send(S2C::ClipboardData(content.clone())).await;
+    }
 }
 
 /// Emit an info-level summary of every client's modifier_map and warn about
@@ -836,7 +875,14 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients.clone(), config));
+        let handle = tokio::spawn(handle_stream(
+            sr,
+            sw,
+            test_peer(),
+            clients.clone(),
+            config,
+            None,
+        ));
 
         let response = do_handshake(&mut cw, &mut cr, "known-client").await;
         assert!(matches!(response, S2C::Hello(_)));
@@ -858,7 +904,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
 
         // Send Hello with a name not in the server config.
         transport::send_c2s(
@@ -889,7 +935,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
 
         transport::send_c2s(
             &mut cw,
@@ -915,7 +961,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
 
         transport::send_c2s(&mut cw, &C2S::Pong).await.unwrap();
 
@@ -934,7 +980,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
         do_handshake(&mut cw, &mut cr, "c").await;
 
         transport::send_c2s(&mut cw, &C2S::Pong).await.unwrap();
@@ -952,7 +998,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
         do_handshake(&mut cw, &mut cr, "c").await;
 
         transport::send_c2s(
@@ -987,6 +1033,7 @@ mod tests {
             "127.0.0.1:1".parse().unwrap(),
             clients.clone(),
             config.clone(),
+            None,
         ));
         do_handshake(&mut cw_a, &mut cr_a, "known-client").await;
 
@@ -999,6 +1046,7 @@ mod tests {
             "127.0.0.1:2".parse().unwrap(),
             clients.clone(),
             config.clone(),
+            None,
         ));
         do_handshake(&mut cw_b, &mut cr_b, "other-client").await;
 
@@ -1009,6 +1057,20 @@ mod tests {
 
         let msg = transport::recv_s2c(&mut cr_b).await.unwrap();
         assert_eq!(msg, S2C::ClipboardData(content));
+    }
+
+    #[tokio::test]
+    async fn local_clipboard_is_broadcast_to_connected_clients() {
+        let (clients, mut client_rx) = connected_clients();
+        let content = ClipboardContent::Image(ClipboardImage {
+            width: 1,
+            height: 1,
+            rgba: vec![7, 8, 9, 255],
+        });
+
+        broadcast_clipboard(&clients, &content, None).await;
+
+        assert_eq!(client_rx.recv().await.unwrap(), S2C::ClipboardData(content));
     }
 
     // --- Client registration and cleanup ---
@@ -1022,7 +1084,14 @@ mod tests {
         let (sr, sw) = split(server_side);
         let (mut cr, mut cw) = split(client_side);
 
-        let handle = tokio::spawn(handle_stream(sr, sw, test_peer(), clients.clone(), config));
+        let handle = tokio::spawn(handle_stream(
+            sr,
+            sw,
+            test_peer(),
+            clients.clone(),
+            config,
+            None,
+        ));
         do_handshake(&mut cw, &mut cr, "known-client").await;
 
         {
@@ -1050,7 +1119,7 @@ mod tests {
         let clients = empty_clients();
         let config = test_config();
 
-        tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config));
+        tokio::spawn(handle_stream(sr, sw, test_peer(), clients, config, None));
         do_handshake(&mut cw, &mut cr, "known-client").await;
 
         tokio::time::advance(tokio::time::Duration::from_secs(11)).await;

@@ -63,7 +63,7 @@ Source line counts (orientation only, not load-bearing):
 
 ## Protocol
 
-Current `PROTOCOL_VERSION = 3` in `wayflow-proto/src/lib.rs`. **Any change to a
+Current `PROTOCOL_VERSION = 4` in `wayflow-proto/src/lib.rs`. **Any change to a
 wire type bumps this constant.** Mismatched versions are rejected at handshake.
 
 ### Framing
@@ -430,7 +430,7 @@ This rots fast; verify against `git log --oneline` before relying on it.
 
 | Component                              | Status                                       |
 |----------------------------------------|----------------------------------------------|
-| wayflow-proto (v3 wire types)          | complete; round-trip tested                  |
+| wayflow-proto (v4 wire types)          | complete; round-trip tested                  |
 | wayflow-core transport (TLS + framing) | complete                                     |
 | wayflow-core config (server + client)  | complete; hot-reload on save                 |
 | wayflow-core layout (multi-monitor)    | complete                                     |
@@ -443,7 +443,7 @@ This rots fast; verify against `git log --oneline` before relying on it.
 | macOS client inject (CGEvent direct)   | working (mouse, keyboard, scroll, clicks)    |
 | macOS server capture                   | TODO                                         |
 | Windows capture/inject (rdev)          | TODO                                         |
-| Clipboard (all platforms)              | protocol-ready; wiring TODO                  |
+| Clipboard (Linux server + macOS client) | text/image active clipboard sync working     |
 | X11 backends (server + client)         | TODO                                         |
 
 If you take an open `TODO` row, open an issue first to discuss the approach so

@@ -25,7 +25,7 @@ Deskflow (the Synergy fork) carries 20 years of X11 assumptions, uses wl-copy su
 |---------|:-:|:-:|:-:|
 | Client inject (mouse + keyboard) | stub | **working** | stub |
 | Server capture | stub | stub | stub |
-| Clipboard sync | protocol-ready | - | - |
+| Clipboard sync | text/images | text/images | - |
 | TLS transport + handshake | complete | complete | complete |
 
 ---

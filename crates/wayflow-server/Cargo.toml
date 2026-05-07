@@ -18,6 +18,7 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
+arboard       = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

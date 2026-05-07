@@ -9,7 +9,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -28,7 +28,15 @@ pub struct ScreenInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardContent {
     Text(String),
-    // TODO: image/bitmap support
+    Image(ClipboardImage),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8 pixels, row-major, 4 bytes per pixel.
+    pub rgba: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +268,20 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_content_image() {
+        rt(&ClipboardContent::Image(ClipboardImage {
+            width: 2,
+            height: 1,
+            rgba: alloc::vec![255, 0, 0, 255, 0, 0, 255, 255],
+        }));
+        rt(&ClipboardContent::Image(ClipboardImage {
+            width: 0,
+            height: 0,
+            rgba: alloc::vec![],
+        }));
+    }
+
+    #[test]
     fn hello_s2c() {
         rt(&HelloS2C {
             version: PROTOCOL_VERSION,
@@ -398,6 +420,13 @@ mod tests {
         rt(&S2C::ClipboardData(ClipboardContent::Text(
             "paste me".into(),
         )));
+        rt(&S2C::ClipboardData(ClipboardContent::Image(
+            ClipboardImage {
+                width: 1,
+                height: 1,
+                rgba: alloc::vec![1, 2, 3, 4],
+            },
+        )));
     }
 
     #[test]
@@ -419,6 +448,13 @@ mod tests {
     fn c2s_clipboard_data() {
         rt(&C2S::ClipboardData(ClipboardContent::Text(
             "from client".into(),
+        )));
+        rt(&C2S::ClipboardData(ClipboardContent::Image(
+            ClipboardImage {
+                width: 1,
+                height: 1,
+                rgba: alloc::vec![4, 3, 2, 1],
+            },
         )));
     }
 

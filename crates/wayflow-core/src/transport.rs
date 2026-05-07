@@ -150,6 +150,14 @@ mod tests {
         let msg = S2C::ClipboardData(ClipboardContent::Text("hello".into()));
         send_s2c(&mut a, &msg).await.unwrap();
         assert_eq!(recv_s2c(&mut b).await.unwrap(), msg);
+
+        let msg = S2C::ClipboardData(ClipboardContent::Image(ClipboardImage {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 0, 0, 255],
+        }));
+        send_s2c(&mut a, &msg).await.unwrap();
+        assert_eq!(recv_s2c(&mut b).await.unwrap(), msg);
     }
 
     // ---------- C2S roundtrips ----------
@@ -183,6 +191,14 @@ mod tests {
     async fn c2s_clipboard_data_roundtrip() {
         let (mut a, mut b) = duplex(4096);
         let msg = C2S::ClipboardData(ClipboardContent::Text("from client".into()));
+        send_c2s(&mut a, &msg).await.unwrap();
+        assert_eq!(recv_c2s(&mut b).await.unwrap(), msg);
+
+        let msg = C2S::ClipboardData(ClipboardContent::Image(ClipboardImage {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 255, 255],
+        }));
         send_c2s(&mut a, &msg).await.unwrap();
         assert_eq!(recv_c2s(&mut b).await.unwrap(), msg);
     }

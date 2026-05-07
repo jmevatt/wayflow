@@ -124,6 +124,10 @@ where
 {
     let (read_tx, mut read_rx) = mpsc::channel::<Result<S2C>>(16);
     let (write_tx, write_rx) = mpsc::channel::<C2S>(16);
+    #[cfg(not(test))]
+    let clipboard_apply_tx = Some(crate::clipboard::start(write_tx.clone()));
+    #[cfg(test)]
+    let clipboard_apply_tx: Option<mpsc::Sender<wayflow_proto::ClipboardContent>> = None;
 
     let read_task = tokio::spawn(reader_task(r, read_tx));
     let write_task = tokio::spawn(writer_task(w, write_rx));
@@ -139,7 +143,7 @@ where
             msg = read_rx.recv() => {
                 match msg {
                     Some(Ok(s2c)) => {
-                        match handle_msg(s2c, backend, &write_tx, &mut pressed_keys).await {
+                        match handle_msg(s2c, backend, &write_tx, clipboard_apply_tx.as_ref(), &mut pressed_keys).await {
                             Ok(true) => continue,
                             Ok(false) => break Ok(()),
                             Err(e) => break Err(e),
@@ -210,6 +214,7 @@ async fn handle_msg(
     msg: S2C,
     backend: &mut dyn InjectBackend,
     write_tx: &mpsc::Sender<C2S>,
+    clipboard_apply_tx: Option<&mpsc::Sender<wayflow_proto::ClipboardContent>>,
     pressed_keys: &mut BTreeSet<u32>,
 ) -> Result<bool> {
     match msg {
@@ -247,9 +252,13 @@ async fn handle_msg(
                 pressed_keys.remove(&keycode);
             }
         }
-        S2C::ClipboardData(_) => {
-            // TODO: write to local clipboard via smithay-clipboard / arboard
-            info!("clipboard sync received (not yet implemented)");
+        S2C::ClipboardData(content) => {
+            info!("clipboard sync received");
+            if let Some(tx) = clipboard_apply_tx {
+                if tx.send(content).await.is_err() {
+                    warn!("clipboard worker unavailable");
+                }
+            }
         }
         S2C::Ping => {
             debug!("ping");
