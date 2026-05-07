@@ -41,27 +41,19 @@ impl CaptureBackend for RdevCapture {
 
         listen(move |event| {
             let ev = match event.event_type {
-                EventType::MouseMove { x, y } => {
-                    Some(InputEvent::MouseMoveAbs { x, y })
-                }
-                EventType::ButtonPress(btn) => {
-                    Some(InputEvent::MouseButton {
-                        button: rdev_button_to_proto(btn),
-                        pressed: true,
-                    })
-                }
-                EventType::ButtonRelease(btn) => {
-                    Some(InputEvent::MouseButton {
-                        button: rdev_button_to_proto(btn),
-                        pressed: false,
-                    })
-                }
-                EventType::Wheel { delta_x, delta_y } => {
-                    Some(InputEvent::Scroll {
-                        dx: delta_x as f64,
-                        dy: delta_y as f64,
-                    })
-                }
+                EventType::MouseMove { x, y } => Some(InputEvent::MouseMoveAbs { x, y }),
+                EventType::ButtonPress(btn) => Some(InputEvent::MouseButton {
+                    button: rdev_button_to_proto(btn),
+                    pressed: true,
+                }),
+                EventType::ButtonRelease(btn) => Some(InputEvent::MouseButton {
+                    button: rdev_button_to_proto(btn),
+                    pressed: false,
+                }),
+                EventType::Wheel { delta_x, delta_y } => Some(InputEvent::Scroll {
+                    dx: delta_x as f64,
+                    dy: delta_y as f64,
+                }),
                 EventType::KeyPress(key) => {
                     update_modifiers(&mut modifiers, key, true);
                     rdev_keys::rdev_to_hid(key).map(|hid| InputEvent::Key {
@@ -96,9 +88,9 @@ pub fn backend() -> RdevCapture {
 
 fn rdev_button_to_proto(button: Button) -> MouseButton {
     match button {
-        Button::Left       => MouseButton::Left,
-        Button::Right      => MouseButton::Right,
-        Button::Middle     => MouseButton::Middle,
+        Button::Left => MouseButton::Left,
+        Button::Right => MouseButton::Right,
+        Button::Middle => MouseButton::Middle,
         Button::Unknown(4) => MouseButton::Back,
         Button::Unknown(5) => MouseButton::Forward,
         Button::Unknown(n) => MouseButton::Other(n),
@@ -107,10 +99,10 @@ fn rdev_button_to_proto(button: Button) -> MouseButton {
 
 fn update_modifiers(m: &mut Modifiers, key: Key, pressed: bool) {
     match key {
-        Key::ShiftLeft | Key::ShiftRight                 => m.shift = pressed,
-        Key::ControlLeft | Key::ControlRight             => m.ctrl  = pressed,
-        Key::Alt | Key::AltGr                            => m.alt   = pressed,
-        Key::MetaLeft | Key::MetaRight                   => m.meta  = pressed,
+        Key::ShiftLeft | Key::ShiftRight => m.shift = pressed,
+        Key::ControlLeft | Key::ControlRight => m.ctrl = pressed,
+        Key::Alt | Key::AltGr => m.alt = pressed,
+        Key::MetaLeft | Key::MetaRight => m.meta = pressed,
         _ => {}
     }
 }
@@ -127,12 +119,30 @@ mod tests {
 
     #[test]
     fn rdev_button_all_known() {
-        assert!(matches!(rdev_button_to_proto(Button::Left),       MouseButton::Left));
-        assert!(matches!(rdev_button_to_proto(Button::Right),      MouseButton::Right));
-        assert!(matches!(rdev_button_to_proto(Button::Middle),     MouseButton::Middle));
-        assert!(matches!(rdev_button_to_proto(Button::Unknown(4)), MouseButton::Back));
-        assert!(matches!(rdev_button_to_proto(Button::Unknown(5)), MouseButton::Forward));
-        assert!(matches!(rdev_button_to_proto(Button::Unknown(9)), MouseButton::Other(9)));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Left),
+            MouseButton::Left
+        ));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Right),
+            MouseButton::Right
+        ));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Middle),
+            MouseButton::Middle
+        ));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Unknown(4)),
+            MouseButton::Back
+        ));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Unknown(5)),
+            MouseButton::Forward
+        ));
+        assert!(matches!(
+            rdev_button_to_proto(Button::Unknown(9)),
+            MouseButton::Other(9)
+        ));
     }
 
     #[test]
@@ -169,7 +179,10 @@ mod tests {
 
     #[test]
     fn update_modifiers_non_modifier_key_no_change() {
-        let mut m = Modifiers { shift: true, ..Modifiers::default() };
+        let mut m = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         update_modifiers(&mut m, Key::KeyA, true);
         assert!(m.shift); // unchanged
     }

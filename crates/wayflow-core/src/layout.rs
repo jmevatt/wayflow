@@ -63,37 +63,44 @@ impl ServerLayout {
 
     fn on_any_monitor(&self, cx: i32, cy: i32) -> bool {
         self.monitors.iter().any(|m| {
-            cx >= m.x && cx < m.x + m.width as i32 &&
-            cy >= m.y && cy < m.y + m.height as i32
+            cx >= m.x && cx < m.x + m.width as i32 && cy >= m.y && cy < m.y + m.height as i32
         })
     }
 
     pub fn at_right_edge(&self, cx: i32, cy: i32) -> bool {
-        self.on_any_monitor(cx, cy) &&
-        self.right_boundary_at(cy).map(|b| cx >= b).unwrap_or(false)
+        self.on_any_monitor(cx, cy) && self.right_boundary_at(cy).map(|b| cx >= b).unwrap_or(false)
     }
 
     pub fn at_left_edge(&self, cx: i32, cy: i32) -> bool {
-        self.on_any_monitor(cx, cy) &&
-        self.left_boundary_at(cy).map(|b| cx <= b).unwrap_or(false)
+        self.on_any_monitor(cx, cy) && self.left_boundary_at(cy).map(|b| cx <= b).unwrap_or(false)
     }
 
     pub fn at_bottom_edge(&self, cx: i32, cy: i32) -> bool {
-        self.on_any_monitor(cx, cy) &&
-        self.bottom_boundary_at(cx).map(|b| cy >= b).unwrap_or(false)
+        self.on_any_monitor(cx, cy)
+            && self
+                .bottom_boundary_at(cx)
+                .map(|b| cy >= b)
+                .unwrap_or(false)
     }
 
     pub fn at_top_edge(&self, cx: i32, cy: i32) -> bool {
-        self.on_any_monitor(cx, cy) &&
-        self.top_boundary_at(cx).map(|b| cy <= b).unwrap_or(false)
+        self.on_any_monitor(cx, cy) && self.top_boundary_at(cx).map(|b| cy <= b).unwrap_or(false)
     }
 
     /// Returns which edge the cursor is at, if any. Right/Left take priority over Bottom/Top.
     pub fn crossed_edge(&self, cx: i32, cy: i32) -> Option<Edge> {
-        if self.at_right_edge(cx, cy)  { return Some(Edge::Right); }
-        if self.at_left_edge(cx, cy)   { return Some(Edge::Left); }
-        if self.at_bottom_edge(cx, cy) { return Some(Edge::Bottom); }
-        if self.at_top_edge(cx, cy)    { return Some(Edge::Top); }
+        if self.at_right_edge(cx, cy) {
+            return Some(Edge::Right);
+        }
+        if self.at_left_edge(cx, cy) {
+            return Some(Edge::Left);
+        }
+        if self.at_bottom_edge(cx, cy) {
+            return Some(Edge::Bottom);
+        }
+        if self.at_top_edge(cx, cy) {
+            return Some(Edge::Top);
+        }
         None
     }
 }
@@ -113,10 +120,10 @@ pub fn map_to_client(
     let cw = client.width as i32;
     let ch = client.height as i32;
     let (cx, cy) = match edge {
-        Edge::Right  => (0,        (server_y - offset).clamp(0, ch - 1)),
-        Edge::Left   => (cw - 1,   (server_y - offset).clamp(0, ch - 1)),
+        Edge::Right => (0, (server_y - offset).clamp(0, ch - 1)),
+        Edge::Left => (cw - 1, (server_y - offset).clamp(0, ch - 1)),
         Edge::Bottom => ((server_x - offset).clamp(0, cw - 1), 0),
-        Edge::Top    => ((server_x - offset).clamp(0, cw - 1), ch - 1),
+        Edge::Top => ((server_x - offset).clamp(0, cw - 1), ch - 1),
     };
     (cx as u16, cy as u16)
 }
@@ -127,7 +134,13 @@ mod tests {
     use wayflow_proto::ScreenInfo;
 
     fn mon(x: i32, y: i32, w: u16, h: u16) -> ScreenInfo {
-        ScreenInfo { name: String::new(), x, y, width: w, height: h }
+        ScreenInfo {
+            name: String::new(),
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     fn client(w: u16, h: u16) -> ScreenInfo {
@@ -216,9 +229,9 @@ mod tests {
     #[test]
     fn single_crossed_edge_all_sides() {
         assert_eq!(single().crossed_edge(2559, 500), Some(Edge::Right));
-        assert_eq!(single().crossed_edge(0, 500),    Some(Edge::Left));
+        assert_eq!(single().crossed_edge(0, 500), Some(Edge::Left));
         assert_eq!(single().crossed_edge(100, 1439), Some(Edge::Bottom));
-        assert_eq!(single().crossed_edge(100, 0),    Some(Edge::Top));
+        assert_eq!(single().crossed_edge(100, 0), Some(Edge::Top));
     }
 
     // ---- dual side-by-side: the key multi-monitor case ----

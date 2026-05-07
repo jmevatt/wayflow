@@ -52,8 +52,8 @@ pub fn server_tls(cert_path: &Path, key_path: &Path) -> Result<ServerTlsConfig> 
     if cert_path.exists() && key_path.exists() {
         let cert_pem = std::fs::read(cert_path)?;
         let key_pem = std::fs::read(key_path)?;
-        let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
-            .collect::<Result<Vec<_>, _>>()?;
+        let certs =
+            rustls_pemfile::certs(&mut cert_pem.as_slice()).collect::<Result<Vec<_>, _>>()?;
         let key = rustls_pemfile::private_key(&mut key_pem.as_slice())?
             .ok_or_else(|| anyhow::anyhow!("no private key in {}", key_path.display()))?;
         return Ok(ServerTlsConfig { cert: certs, key });
@@ -210,17 +210,29 @@ pub fn client_tls_insecure() -> Result<rustls::ClientConfig> {
 
     impl ServerCertVerifier for AcceptAny {
         fn verify_server_cert(
-            &self, _: &CertificateDer, _: &[CertificateDer], _: &ServerName,
-            _: &[u8], _: UnixTime,
+            &self,
+            _: &CertificateDer,
+            _: &[CertificateDer],
+            _: &ServerName,
+            _: &[u8],
+            _: UnixTime,
         ) -> Result<ServerCertVerified, Error> {
             Ok(ServerCertVerified::assertion())
         }
-        fn verify_tls12_signature(&self, _: &[u8], _: &CertificateDer, _: &DigitallySignedStruct)
-            -> Result<HandshakeSignatureValid, Error> {
+        fn verify_tls12_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
             Ok(HandshakeSignatureValid::assertion())
         }
-        fn verify_tls13_signature(&self, _: &[u8], _: &CertificateDer, _: &DigitallySignedStruct)
-            -> Result<HandshakeSignatureValid, Error> {
+        fn verify_tls13_signature(
+            &self,
+            _: &[u8],
+            _: &CertificateDer,
+            _: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
             Ok(HandshakeSignatureValid::assertion())
         }
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -300,7 +312,11 @@ mod tests {
     fn client_tls_insecure_builds_config() {
         init();
         let result = client_tls_insecure();
-        assert!(result.is_ok(), "client_tls_insecure failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "client_tls_insecure failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -323,7 +339,10 @@ mod tests {
     #[test]
     fn addr_to_filename_sanitizes_colon_and_dot() {
         assert_eq!(addr_to_filename("helicon:24800"), "helicon_24800.crt");
-        assert_eq!(addr_to_filename("192.168.1.2:24800"), "192_168_1_2_24800.crt");
+        assert_eq!(
+            addr_to_filename("192.168.1.2:24800"),
+            "192_168_1_2_24800.crt"
+        );
     }
 
     #[test]

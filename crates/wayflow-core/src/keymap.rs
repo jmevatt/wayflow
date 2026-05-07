@@ -14,27 +14,32 @@ pub mod evdev {
     // Source: Linux kernel drivers/hid/hid-input.c hid_keyboard[].
     static HID_TO_EVDEV: [u16; 256] = [
         //  +0    +1    +2    +3    +4    +5    +6    +7    +8    +9    +A    +B    +C    +D    +E    +F
-            0,    0,    0,    0,    30,   48,   46,   32,   18,   33,   34,   35,   23,   36,   37,   38,  // 0x00
-            50,   49,   24,   25,   16,   19,   31,   20,   22,   47,   17,   45,   21,   44,   2,    3,   // 0x10
-            4,    5,    6,    7,    8,    9,    10,   11,   28,   1,    14,   15,   57,   12,   13,   26,  // 0x20
-            27,   43,   43,   39,   40,   41,   51,   52,   53,   58,   59,   60,   61,   62,   63,   64,  // 0x30
-            65,   66,   67,   68,   87,   88,   99,   70,   119,  110,  102,  104,  111,  107,  109,  106, // 0x40
-            105,  108,  103,  69,   98,   55,   74,   78,   96,   79,   80,   81,   75,   76,   77,   71,  // 0x50
-            72,   73,   82,   83,   86,   127,  116,  117,  183,  184,  185,  186,  187,  188,  189,  190, // 0x60
-            191,  192,  193,  194,  134,  138,  130,  132,  128,  129,  131,  137,  133,  135,  136,  113, // 0x70
-            115,  114,  0,    0,    0,    121,  0,    89,   93,   124,  92,   94,   95,   0,    0,    0,   // 0x80
-            122,  123,  90,   91,   85,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0x90
-            0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0xA0
-            0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0xB0
-            0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0xC0
-            0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0xD0
-            29,   42,   56,   125,  97,   54,   100,  126,  0,    0,    0,    0,    0,    0,    0,    0,  // 0xE0
-            0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,   // 0xF0
+        0, 0, 0, 0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, // 0x00
+        50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44, 2, 3, // 0x10
+        4, 5, 6, 7, 8, 9, 10, 11, 28, 1, 14, 15, 57, 12, 13, 26, // 0x20
+        27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64, // 0x30
+        65, 66, 67, 68, 87, 88, 99, 70, 119, 110, 102, 104, 111, 107, 109, 106, // 0x40
+        105, 108, 103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71, // 0x50
+        72, 73, 82, 83, 86, 127, 116, 117, 183, 184, 185, 186, 187, 188, 189, 190, // 0x60
+        191, 192, 193, 194, 134, 138, 130, 132, 128, 129, 131, 137, 133, 135, 136,
+        113, // 0x70
+        115, 114, 0, 0, 0, 121, 0, 89, 93, 124, 92, 94, 95, 0, 0, 0, // 0x80
+        122, 123, 90, 91, 85, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0x90
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xA0
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xB0
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xC0
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xD0
+        29, 42, 56, 125, 97, 54, 100, 126, 0, 0, 0, 0, 0, 0, 0, 0, // 0xE0
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xF0
     ];
 
     pub fn hid_to_evdev(hid: u32) -> Option<u32> {
         let v = *HID_TO_EVDEV.get(hid as usize)?;
-        if v == 0 { None } else { Some(v as u32) }
+        if v == 0 {
+            None
+        } else {
+            Some(v as u32)
+        }
     }
 
     pub fn evdev_to_hid(evdev: u32) -> Option<u32> {
@@ -386,11 +391,31 @@ pub mod rdev_keys {
         #[test]
         fn all_letters_roundtrip() {
             let letters = [
-                Key::KeyA, Key::KeyB, Key::KeyC, Key::KeyD, Key::KeyE,
-                Key::KeyF, Key::KeyG, Key::KeyH, Key::KeyI, Key::KeyJ,
-                Key::KeyK, Key::KeyL, Key::KeyM, Key::KeyN, Key::KeyO,
-                Key::KeyP, Key::KeyQ, Key::KeyR, Key::KeyS, Key::KeyT,
-                Key::KeyU, Key::KeyV, Key::KeyW, Key::KeyX, Key::KeyY,
+                Key::KeyA,
+                Key::KeyB,
+                Key::KeyC,
+                Key::KeyD,
+                Key::KeyE,
+                Key::KeyF,
+                Key::KeyG,
+                Key::KeyH,
+                Key::KeyI,
+                Key::KeyJ,
+                Key::KeyK,
+                Key::KeyL,
+                Key::KeyM,
+                Key::KeyN,
+                Key::KeyO,
+                Key::KeyP,
+                Key::KeyQ,
+                Key::KeyR,
+                Key::KeyS,
+                Key::KeyT,
+                Key::KeyU,
+                Key::KeyV,
+                Key::KeyW,
+                Key::KeyX,
+                Key::KeyY,
                 Key::KeyZ,
             ];
             for key in letters {
@@ -402,8 +427,18 @@ pub mod rdev_keys {
 
         #[test]
         fn digits_roundtrip() {
-            for key in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
-                        Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0] {
+            for key in [
+                Key::Num1,
+                Key::Num2,
+                Key::Num3,
+                Key::Num4,
+                Key::Num5,
+                Key::Num6,
+                Key::Num7,
+                Key::Num8,
+                Key::Num9,
+                Key::Num0,
+            ] {
                 let hid = rdev_to_hid(key).unwrap();
                 assert_eq!(hid_to_rdev(hid), Some(key));
             }
@@ -411,8 +446,20 @@ pub mod rdev_keys {
 
         #[test]
         fn function_keys_roundtrip() {
-            for key in [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6,
-                        Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12] {
+            for key in [
+                Key::F1,
+                Key::F2,
+                Key::F3,
+                Key::F4,
+                Key::F5,
+                Key::F6,
+                Key::F7,
+                Key::F8,
+                Key::F9,
+                Key::F10,
+                Key::F11,
+                Key::F12,
+            ] {
                 let hid = rdev_to_hid(key).unwrap();
                 assert_eq!(hid_to_rdev(hid), Some(key));
             }
@@ -420,9 +467,16 @@ pub mod rdev_keys {
 
         #[test]
         fn modifiers_roundtrip() {
-            for key in [Key::ControlLeft, Key::ControlRight, Key::ShiftLeft,
-                        Key::ShiftRight, Key::Alt, Key::AltGr, Key::MetaLeft,
-                        Key::MetaRight] {
+            for key in [
+                Key::ControlLeft,
+                Key::ControlRight,
+                Key::ShiftLeft,
+                Key::ShiftRight,
+                Key::Alt,
+                Key::AltGr,
+                Key::MetaLeft,
+                Key::MetaRight,
+            ] {
                 let hid = rdev_to_hid(key).unwrap();
                 assert_eq!(hid_to_rdev(hid), Some(key));
             }
@@ -430,9 +484,18 @@ pub mod rdev_keys {
 
         #[test]
         fn nav_keys_roundtrip() {
-            for key in [Key::UpArrow, Key::DownArrow, Key::LeftArrow, Key::RightArrow,
-                        Key::Home, Key::End, Key::PageUp, Key::PageDown,
-                        Key::Insert, Key::Delete] {
+            for key in [
+                Key::UpArrow,
+                Key::DownArrow,
+                Key::LeftArrow,
+                Key::RightArrow,
+                Key::Home,
+                Key::End,
+                Key::PageUp,
+                Key::PageDown,
+                Key::Insert,
+                Key::Delete,
+            ] {
                 let hid = rdev_to_hid(key).unwrap();
                 assert_eq!(hid_to_rdev(hid), Some(key));
             }
@@ -440,10 +503,24 @@ pub mod rdev_keys {
 
         #[test]
         fn numpad_roundtrip() {
-            for key in [Key::Kp0, Key::Kp1, Key::Kp2, Key::Kp3, Key::Kp4,
-                        Key::Kp5, Key::Kp6, Key::Kp7, Key::Kp8, Key::Kp9,
-                        Key::KpReturn, Key::KpPlus, Key::KpMinus,
-                        Key::KpMultiply, Key::KpDivide, Key::KpDelete] {
+            for key in [
+                Key::Kp0,
+                Key::Kp1,
+                Key::Kp2,
+                Key::Kp3,
+                Key::Kp4,
+                Key::Kp5,
+                Key::Kp6,
+                Key::Kp7,
+                Key::Kp8,
+                Key::Kp9,
+                Key::KpReturn,
+                Key::KpPlus,
+                Key::KpMinus,
+                Key::KpMultiply,
+                Key::KpDivide,
+                Key::KpDelete,
+            ] {
                 let hid = rdev_to_hid(key).unwrap();
                 assert_eq!(hid_to_rdev(hid), Some(key));
             }

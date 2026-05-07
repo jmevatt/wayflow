@@ -53,20 +53,22 @@ pub struct ClientEntry {
 pub fn modifier_name_to_hid(name: &str) -> Option<u32> {
     match name {
         // Ctrl
-        "ctrl_left"  | "control_left"  => Some(0xE0),
+        "ctrl_left" | "control_left" => Some(0xE0),
         "ctrl_right" | "control_right" => Some(0xE4),
 
         // Shift
-        "shift_left"  => Some(0xE1),
+        "shift_left" => Some(0xE1),
         "shift_right" => Some(0xE5),
 
         // Alt / Option
-        "alt"        | "alt_left"  | "option"       | "option_left"  | "opt"       | "opt_left"  => Some(0xE2),
-        "alt_gr"     | "alt_right" | "option_right" | "opt_right"                                => Some(0xE6),
+        "alt" | "alt_left" | "option" | "option_left" | "opt" | "opt_left" => Some(0xE2),
+        "alt_gr" | "alt_right" | "option_right" | "opt_right" => Some(0xE6),
 
         // Meta / Super / Cmd / Windows
-        "meta_left"  | "super"       | "super_left"  | "cmd"       | "cmd_left"  | "command"       | "command_left"  | "win"       | "win_left"  | "windows"       | "windows_left"  => Some(0xE3),
-        "meta_right" | "super_right" | "cmd_right"   | "command_right" | "win_right" | "windows_right" => Some(0xE7),
+        "meta_left" | "super" | "super_left" | "cmd" | "cmd_left" | "command" | "command_left"
+        | "win" | "win_left" | "windows" | "windows_left" => Some(0xE3),
+        "meta_right" | "super_right" | "cmd_right" | "command_right" | "win_right"
+        | "windows_right" => Some(0xE7),
 
         _ => None,
     }
@@ -207,7 +209,12 @@ mod tests {
     fn all_edge_variants_roundtrip_in_client_entry() {
         // TOML can't serialize a bare enum at top level; test via ClientEntry.
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
-            let entry = ClientEntry { name: "test".into(), edge, offset: 0, modifier_map: Default::default() };
+            let entry = ClientEntry {
+                name: "test".into(),
+                edge,
+                offset: 0,
+                modifier_map: Default::default(),
+            };
             let s = toml::to_string(&entry).unwrap();
             let back: ClientEntry = toml::from_str(&s).unwrap();
             assert_eq!(back.edge, edge, "failed for {edge:?}");
@@ -220,10 +227,23 @@ mod tests {
         let path = dir.path().join("config.toml");
 
         let original = Config {
-            server: ServerConfig { name: "helicon".into(), port: 24800 },
+            server: ServerConfig {
+                name: "helicon".into(),
+                port: 24800,
+            },
             clients: vec![
-                ClientEntry { name: "trantor".into(), edge: Edge::Right, offset: 0, modifier_map: Default::default() },
-                ClientEntry { name: "other".into(), edge: Edge::Bottom, offset: -50, modifier_map: Default::default() },
+                ClientEntry {
+                    name: "trantor".into(),
+                    edge: Edge::Right,
+                    offset: 0,
+                    modifier_map: Default::default(),
+                },
+                ClientEntry {
+                    name: "other".into(),
+                    edge: Edge::Bottom,
+                    offset: -50,
+                    modifier_map: Default::default(),
+                },
             ],
         };
         original.save(&path).unwrap();
@@ -258,7 +278,10 @@ name = "minimal"
         let path = dir.path().join("deep").join("nested").join("config.toml");
 
         let config = Config {
-            server: ServerConfig { name: "srv".into(), port: 9999 },
+            server: ServerConfig {
+                name: "srv".into(),
+                port: 9999,
+            },
             clients: vec![],
         };
         config.save(&path).unwrap();
@@ -273,41 +296,77 @@ name = "minimal"
 
     #[test]
     fn modifier_name_to_hid_known() {
-        assert_eq!(modifier_name_to_hid("ctrl_left"),  Some(0xE0));
+        assert_eq!(modifier_name_to_hid("ctrl_left"), Some(0xE0));
         assert_eq!(modifier_name_to_hid("shift_left"), Some(0xE1));
-        assert_eq!(modifier_name_to_hid("alt"),        Some(0xE2));
-        assert_eq!(modifier_name_to_hid("meta_left"),  Some(0xE3));
+        assert_eq!(modifier_name_to_hid("alt"), Some(0xE2));
+        assert_eq!(modifier_name_to_hid("meta_left"), Some(0xE3));
         assert_eq!(modifier_name_to_hid("ctrl_right"), Some(0xE4));
         assert_eq!(modifier_name_to_hid("meta_right"), Some(0xE7));
-        assert_eq!(modifier_name_to_hid("bogus"),      None);
+        assert_eq!(modifier_name_to_hid("bogus"), None);
     }
 
     #[test]
     fn modifier_name_aliases() {
         // Left alt aliases all resolve to 0xE2
-        for n in ["alt", "alt_left", "option", "option_left", "opt", "opt_left"] {
-            assert_eq!(modifier_name_to_hid(n), Some(0xE2), "alias {n} should be 0xE2");
+        for n in [
+            "alt",
+            "alt_left",
+            "option",
+            "option_left",
+            "opt",
+            "opt_left",
+        ] {
+            assert_eq!(
+                modifier_name_to_hid(n),
+                Some(0xE2),
+                "alias {n} should be 0xE2"
+            );
         }
         // Right alt aliases all resolve to 0xE6
         for n in ["alt_gr", "alt_right", "option_right", "opt_right"] {
-            assert_eq!(modifier_name_to_hid(n), Some(0xE6), "alias {n} should be 0xE6");
+            assert_eq!(
+                modifier_name_to_hid(n),
+                Some(0xE6),
+                "alias {n} should be 0xE6"
+            );
         }
         // Left meta aliases (super, cmd, command, win, windows) all resolve to 0xE3
         for n in [
-            "meta_left", "super", "super_left", "cmd", "cmd_left",
-            "command", "command_left", "win", "win_left", "windows", "windows_left",
+            "meta_left",
+            "super",
+            "super_left",
+            "cmd",
+            "cmd_left",
+            "command",
+            "command_left",
+            "win",
+            "win_left",
+            "windows",
+            "windows_left",
         ] {
-            assert_eq!(modifier_name_to_hid(n), Some(0xE3), "alias {n} should be 0xE3");
+            assert_eq!(
+                modifier_name_to_hid(n),
+                Some(0xE3),
+                "alias {n} should be 0xE3"
+            );
         }
         // Right meta aliases all resolve to 0xE7
         for n in [
-            "meta_right", "super_right", "cmd_right",
-            "command_right", "win_right", "windows_right",
+            "meta_right",
+            "super_right",
+            "cmd_right",
+            "command_right",
+            "win_right",
+            "windows_right",
         ] {
-            assert_eq!(modifier_name_to_hid(n), Some(0xE7), "alias {n} should be 0xE7");
+            assert_eq!(
+                modifier_name_to_hid(n),
+                Some(0xE7),
+                "alias {n} should be 0xE7"
+            );
         }
         // Control aliases
-        assert_eq!(modifier_name_to_hid("control_left"),  Some(0xE0));
+        assert_eq!(modifier_name_to_hid("control_left"), Some(0xE0));
         assert_eq!(modifier_name_to_hid("control_right"), Some(0xE4));
     }
 
@@ -316,11 +375,12 @@ name = "minimal"
         // The exact map shape Jordan was using -- previously a silent no-op
         // because alt_left / alt_right weren't recognised.
         let map: HashMap<String, String> = [
-            ("alt_left".into(),   "meta_left".into()),
-            ("alt_right".into(),  "meta_right".into()),
-            ("meta_left".into(),  "alt_left".into()),
+            ("alt_left".into(), "meta_left".into()),
+            ("alt_right".into(), "meta_right".into()),
+            ("meta_left".into(), "alt_left".into()),
             ("meta_right".into(), "alt_right".into()),
-        ].into();
+        ]
+        .into();
 
         assert_eq!(remap_modifier_key(&map, 0xE2), 0xE3); // alt_left -> meta_left
         assert_eq!(remap_modifier_key(&map, 0xE3), 0xE2); // meta_left -> alt_left
@@ -332,11 +392,12 @@ name = "minimal"
     #[test]
     fn remap_modifier_key_swaps_ctrl_meta() {
         let map: HashMap<String, String> = [
-            ("ctrl_left".into(),  "meta_left".into()),
-            ("meta_left".into(),  "ctrl_left".into()),
+            ("ctrl_left".into(), "meta_left".into()),
+            ("meta_left".into(), "ctrl_left".into()),
             ("ctrl_right".into(), "meta_right".into()),
             ("meta_right".into(), "ctrl_right".into()),
-        ].into();
+        ]
+        .into();
 
         assert_eq!(remap_modifier_key(&map, 0xE0), 0xE3); // ctrl_left -> meta_left
         assert_eq!(remap_modifier_key(&map, 0xE3), 0xE0); // meta_left -> ctrl_left

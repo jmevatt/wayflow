@@ -33,9 +33,8 @@ pub fn run() -> Result<()> {
 
     event_loop.run(move |event, _, control_flow| {
         // Wake up at least every 500ms so we can poll the supervised child.
-        *control_flow = ControlFlow::WaitUntil(
-            std::time::Instant::now() + Duration::from_millis(500),
-        );
+        *control_flow =
+            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(500));
 
         // Service menu clicks (the only event source we care about right now).
         while let Ok(ev) = menu_rx.try_recv() {
@@ -223,9 +222,7 @@ fn open_in_editor(p: &std::path::Path) {
             // ($EDITOR=vim) the user gets a flash; that's expected -- they
             // can set it to a graphical one (code, gedit, etc.) for a
             // smoother experience.
-            let _ = std::process::Command::new(&editor)
-                .arg(p)
-                .spawn();
+            let _ = std::process::Command::new(&editor).arg(p).spawn();
             return;
         }
     }

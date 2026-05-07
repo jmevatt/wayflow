@@ -3,8 +3,8 @@
 // Read live by the signal handler in `server::run` to produce a JSON dump
 // at /tmp/wayflow-server-state.json without disrupting the routing path.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wayflow_proto::ScreenInfo;
 
 #[derive(Default)]
@@ -40,11 +40,11 @@ pub struct TelemetryView {
 impl Telemetry {
     pub fn snapshot(&self) -> TelemetryView {
         TelemetryView {
-            input_events_dropped_full:   self.input_events_dropped_full.load(Ordering::Relaxed),
+            input_events_dropped_full: self.input_events_dropped_full.load(Ordering::Relaxed),
             input_events_dropped_closed: self.input_events_dropped_closed.load(Ordering::Relaxed),
-            s2c_slow_sends:              self.s2c_slow_sends.load(Ordering::Relaxed),
-            capture_slow_emits:          self.capture_slow_emits.load(Ordering::Relaxed),
-            dumps_emitted:               self.dumps_emitted.load(Ordering::Relaxed),
+            s2c_slow_sends: self.s2c_slow_sends.load(Ordering::Relaxed),
+            capture_slow_emits: self.capture_slow_emits.load(Ordering::Relaxed),
+            dumps_emitted: self.dumps_emitted.load(Ordering::Relaxed),
         }
     }
 }

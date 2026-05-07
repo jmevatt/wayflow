@@ -11,7 +11,7 @@
 //!     new values on the next start.
 
 pub mod app;
-pub mod supervisor;
 pub mod icon;
+pub mod supervisor;
 
 pub use app::run;

@@ -10,13 +10,15 @@
 //
 // GNOME >= 45 supports InputCapture (portal version 1).
 
-use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream, sync::Arc};
 use std::sync::atomic::Ordering;
+use std::{collections::HashMap, num::NonZeroU32, os::unix::net::UnixStream, sync::Arc};
 
 use ashpd::desktop::input_capture::Region;
 
 use anyhow::{Context, Result};
-use ashpd::desktop::input_capture::{Activated, ActivatedBarrier, Barrier, BarrierID, Capabilities, InputCapture};
+use ashpd::desktop::input_capture::{
+    Activated, ActivatedBarrier, Barrier, BarrierID, Capabilities, InputCapture,
+};
 use futures::StreamExt;
 use reis::{
     ei,
@@ -43,11 +45,15 @@ fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Teleme
     match tx.try_send(event) {
         Ok(()) => {}
         Err(TrySendError::Full(dropped)) => {
-            telemetry.input_events_dropped_full.fetch_add(1, Ordering::Relaxed);
+            telemetry
+                .input_events_dropped_full
+                .fetch_add(1, Ordering::Relaxed);
             warn!("input pipeline full (256 cap reached); dropping {dropped:?}");
         }
         Err(TrySendError::Closed(_)) => {
-            telemetry.input_events_dropped_closed.fetch_add(1, Ordering::Relaxed);
+            telemetry
+                .input_events_dropped_closed
+                .fetch_add(1, Ordering::Relaxed);
             // route_events task has exited -- server is shutting down. Ignore.
         }
     }
@@ -65,13 +71,18 @@ async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemet
     let start = tokio::time::Instant::now();
     if tx.send(event).await.is_err() {
         // Receiver gone -- server shutting down. Match try_emit's silent close handling.
-        telemetry.input_events_dropped_closed.fetch_add(1, Ordering::Relaxed);
+        telemetry
+            .input_events_dropped_closed
+            .fetch_add(1, Ordering::Relaxed);
         return;
     }
     let elapsed = start.elapsed();
     if elapsed > SLOW_THRESHOLD {
         telemetry.capture_slow_emits.fetch_add(1, Ordering::Relaxed);
-        warn!("capture emit took {:?} -- route_events is back-pressured", elapsed);
+        warn!(
+            "capture emit took {:?} -- route_events is back-pressured",
+            elapsed
+        );
     }
 }
 
@@ -80,10 +91,10 @@ async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemet
 /// without telling us which physical key is depressed; we always pick the
 /// left variant for synthesis. Either left or right releases the modifier
 /// flag at the macOS Window Server, so the choice is benign.
-const HID_LEFT_CTRL:  u32 = 0xE0;
+const HID_LEFT_CTRL: u32 = 0xE0;
 const HID_LEFT_SHIFT: u32 = 0xE1;
-const HID_LEFT_ALT:   u32 = 0xE2;
-const HID_LEFT_META:  u32 = 0xE3;
+const HID_LEFT_ALT: u32 = 0xE2;
+const HID_LEFT_META: u32 = 0xE3;
 
 fn modifier_hid_codes(mods: Modifiers) -> impl Iterator<Item = u32> {
     [
@@ -145,18 +156,31 @@ async fn capture_async(
     let regions: Vec<Region> = zones.regions().to_vec();
 
     // Publish actual monitor layout to route_events before setting barriers.
-    let screen_infos: Vec<ScreenInfo> = regions.iter().map(|r| ScreenInfo {
-        name: String::new(),
-        x: r.x_offset(),
-        y: r.y_offset(),
-        width: r.width() as u16,
-        height: r.height() as u16,
-    }).collect();
-    debug!("zones: {:?}", screen_infos.iter().map(|s| format!("{}x{}+{}+{}", s.width, s.height, s.x, s.y)).collect::<Vec<_>>());
+    let screen_infos: Vec<ScreenInfo> = regions
+        .iter()
+        .map(|r| ScreenInfo {
+            name: String::new(),
+            x: r.x_offset(),
+            y: r.y_offset(),
+            width: r.width() as u16,
+            height: r.height() as u16,
+        })
+        .collect();
+    debug!(
+        "zones: {:?}",
+        screen_infos
+            .iter()
+            .map(|s| format!("{}x{}+{}+{}", s.width, s.height, s.x, s.y))
+            .collect::<Vec<_>>()
+    );
     let _ = monitors_tx.send(screen_infos);
 
     let (barriers, barrier_dirs) = build_barriers(&regions);
-    debug!("setting {} external barriers across {} zone(s)", barriers.len(), regions.len());
+    debug!(
+        "setting {} external barriers across {} zone(s)",
+        barriers.len(),
+        regions.len()
+    );
 
     let barrier_resp = portal
         .set_pointer_barriers(&session, &barriers, zone_set)
@@ -166,10 +190,16 @@ async fn capture_async(
         .context("set_pointer_barriers response")?;
 
     if !barrier_resp.failed_barriers().is_empty() {
-        warn!("some barriers were rejected: {:?}", barrier_resp.failed_barriers());
+        warn!(
+            "some barriers were rejected: {:?}",
+            barrier_resp.failed_barriers()
+        );
     }
 
-    let fd = portal.connect_to_eis(&session).await.context("connect_to_eis")?;
+    let fd = portal
+        .connect_to_eis(&session)
+        .await
+        .context("connect_to_eis")?;
     let stream = UnixStream::from(fd);
     let ei_context = ei::Context::new(stream).context("EI context")?;
 
@@ -188,8 +218,14 @@ async fn capture_async(
     portal.enable(&session).await.context("enable")?;
     info!("InputCapture enabled; waiting for cursor to hit a barrier");
 
-    let mut activated_stream = portal.receive_activated().await.context("receive_activated")?;
-    let mut deactivated_stream = portal.receive_deactivated().await.context("receive_deactivated")?;
+    let mut activated_stream = portal
+        .receive_activated()
+        .await
+        .context("receive_activated")?;
+    let mut deactivated_stream = portal
+        .receive_deactivated()
+        .await
+        .context("receive_deactivated")?;
 
     let mut active: Option<ActivationState> = None;
     let mut modifiers = Modifiers::default();
@@ -297,7 +333,12 @@ async fn capture_async(
 /// Which side of the desktop the triggered barrier is on.
 /// Used to nudge the cursor perpendicular to the barrier on release.
 #[derive(Clone, Copy, Debug)]
-enum NudgeDir { Left, Right, Top, Bottom }
+enum NudgeDir {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
 
 struct ActivationState {
     activation_id: Option<u32>,
@@ -338,10 +379,14 @@ async fn handle_ei_event(
             let state = active.as_mut().unwrap();
             state.cursor_pos.0 += evt.dx as f64;
             state.cursor_pos.1 += evt.dy as f64;
-            try_emit(tx, InputEvent::MouseMoveAbs {
-                x: state.cursor_pos.0,
-                y: state.cursor_pos.1,
-            }, telemetry);
+            try_emit(
+                tx,
+                InputEvent::MouseMoveAbs {
+                    x: state.cursor_pos.0,
+                    y: state.cursor_pos.1,
+                },
+                telemetry,
+            );
         }
 
         EiEvent::Button(evt) if active.is_some() => {
@@ -382,8 +427,21 @@ async fn handle_ei_event(
                 // Update held_keys AFTER successful emit so that if the
                 // emit drops (channel closed during shutdown), the
                 // deactivation flush still has a record to release.
-                emit_blocking(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers }, telemetry).await;
-                if pressed { held_keys.insert(hid); } else { held_keys.remove(&hid); }
+                emit_blocking(
+                    tx,
+                    InputEvent::Key {
+                        keycode: hid,
+                        pressed,
+                        modifiers: *modifiers,
+                    },
+                    telemetry,
+                )
+                .await;
+                if pressed {
+                    held_keys.insert(hid);
+                } else {
+                    held_keys.remove(&hid);
+                }
             } else {
                 debug!("evdev key {} has no HID mapping, skipping", evt.key);
             }
@@ -419,16 +477,16 @@ fn evdev_to_mouse_button(code: u32) -> MouseButton {
         0x112 => MouseButton::Middle,
         0x113 => MouseButton::Back,
         0x114 => MouseButton::Forward,
-        n     => MouseButton::Other((n & 0xff) as u8),
+        n => MouseButton::Other((n & 0xff) as u8),
     }
 }
 
 fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
     Modifiers {
         shift: (depressed & 0x01) != 0,
-        ctrl:  (depressed & 0x04) != 0,
-        alt:   (depressed & 0x08) != 0,
-        meta:  (depressed & 0x40) != 0,
+        ctrl: (depressed & 0x04) != 0,
+        alt: (depressed & 0x08) != 0,
+        meta: (depressed & 0x40) != 0,
     }
 }
 
@@ -438,18 +496,30 @@ fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
 fn nudge_inside(pos: (f64, f64), regions: &[Region]) -> (f64, f64) {
     const MARGIN: f64 = 5.0;
     for r in regions {
-        let rx  = r.x_offset() as f64;
-        let ry  = r.y_offset() as f64;
-        let rx2 = rx + r.width()  as f64 - 1.0;
+        let rx = r.x_offset() as f64;
+        let ry = r.y_offset() as f64;
+        let rx2 = rx + r.width() as f64 - 1.0;
         let ry2 = ry + r.height() as f64 - 1.0;
         // Accept this region if pos is within MARGIN of its bounding box.
-        if pos.0 < rx - MARGIN || pos.0 > rx2 + MARGIN { continue; }
-        if pos.1 < ry - MARGIN || pos.1 > ry2 + MARGIN { continue; }
+        if pos.0 < rx - MARGIN || pos.0 > rx2 + MARGIN {
+            continue;
+        }
+        if pos.1 < ry - MARGIN || pos.1 > ry2 + MARGIN {
+            continue;
+        }
         let (mut x, mut y) = pos;
-        if x <= rx  { x = rx  + MARGIN; }
-        if x >= rx2 { x = rx2 - MARGIN; }
-        if y <= ry  { y = ry  + MARGIN; }
-        if y >= ry2 { y = ry2 - MARGIN; }
+        if x <= rx {
+            x = rx + MARGIN;
+        }
+        if x >= rx2 {
+            x = rx2 - MARGIN;
+        }
+        if y <= ry {
+            y = ry + MARGIN;
+        }
+        if y >= ry2 {
+            y = ry2 - MARGIN;
+        }
         return (x, y);
     }
     pos
@@ -460,9 +530,9 @@ fn nudge_inside(pos: (f64, f64), regions: &[Region]) -> (f64, f64) {
 fn nudge_by_dir(pos: (f64, f64), dir: NudgeDir) -> (f64, f64) {
     const MARGIN: f64 = 5.0;
     match dir {
-        NudgeDir::Left   => (pos.0 + MARGIN, pos.1),
-        NudgeDir::Right  => (pos.0 - MARGIN, pos.1),
-        NudgeDir::Top    => (pos.0, pos.1 + MARGIN),
+        NudgeDir::Left => (pos.0 + MARGIN, pos.1),
+        NudgeDir::Right => (pos.0 - MARGIN, pos.1),
+        NudgeDir::Top => (pos.0, pos.1 + MARGIN),
         NudgeDir::Bottom => (pos.0, pos.1 - MARGIN),
     }
 }
@@ -482,11 +552,9 @@ fn has_right_neighbor(regions: &[Region], r: &Region) -> bool {
     let x2 = r.x_offset() + r.width() as i32;
     let ry = r.y_offset();
     let ry2 = ry + r.height() as i32;
-    regions.iter().any(|o| {
-        o.x_offset() == x2
-            && o.y_offset() < ry2
-            && o.y_offset() + o.height() as i32 > ry
-    })
+    regions
+        .iter()
+        .any(|o| o.x_offset() == x2 && o.y_offset() < ry2 && o.y_offset() + o.height() as i32 > ry)
 }
 
 fn has_left_neighbor(regions: &[Region], r: &Region) -> bool {
@@ -504,11 +572,9 @@ fn has_bottom_neighbor(regions: &[Region], r: &Region) -> bool {
     let y2 = r.y_offset() + r.height() as i32;
     let rx = r.x_offset();
     let rx2 = rx + r.width() as i32;
-    regions.iter().any(|o| {
-        o.y_offset() == y2
-            && o.x_offset() < rx2
-            && o.x_offset() + o.width() as i32 > rx
-    })
+    regions
+        .iter()
+        .any(|o| o.y_offset() == y2 && o.x_offset() < rx2 && o.x_offset() + o.width() as i32 > rx)
 }
 
 fn has_top_neighbor(regions: &[Region], r: &Region) -> bool {
@@ -528,16 +594,32 @@ fn build_barriers(regions: &[Region]) -> (Vec<Barrier>, HashMap<u32, NudgeDir>) 
     let mut id: u32 = 1;
     let nz = |n: u32| -> BarrierID { NonZeroU32::new(n).unwrap() };
     for region in regions {
-        let x  = region.x_offset();
-        let y  = region.y_offset();
-        let x2 = x + region.width()  as i32 - 1;
+        let x = region.x_offset();
+        let y = region.y_offset();
+        let x2 = x + region.width() as i32 - 1;
         let y2 = y + region.height() as i32 - 1;
         // Only place a barrier on edges that are the outer boundary of the desktop.
         // Skip edges where an adjacent monitor forms an internal seam.
-        if !has_right_neighbor(regions, region)  { barriers.push(Barrier::new(nz(id), (x2, y,  x2, y2))); dir_map.insert(id, NudgeDir::Right);  id += 1; }
-        if !has_left_neighbor(regions, region)   { barriers.push(Barrier::new(nz(id), (x,  y,  x,  y2))); dir_map.insert(id, NudgeDir::Left);   id += 1; }
-        if !has_bottom_neighbor(regions, region) { barriers.push(Barrier::new(nz(id), (x,  y2, x2, y2))); dir_map.insert(id, NudgeDir::Bottom); id += 1; }
-        if !has_top_neighbor(regions, region)    { barriers.push(Barrier::new(nz(id), (x,  y,  x2, y)));  dir_map.insert(id, NudgeDir::Top);    id += 1; }
+        if !has_right_neighbor(regions, region) {
+            barriers.push(Barrier::new(nz(id), (x2, y, x2, y2)));
+            dir_map.insert(id, NudgeDir::Right);
+            id += 1;
+        }
+        if !has_left_neighbor(regions, region) {
+            barriers.push(Barrier::new(nz(id), (x, y, x, y2)));
+            dir_map.insert(id, NudgeDir::Left);
+            id += 1;
+        }
+        if !has_bottom_neighbor(regions, region) {
+            barriers.push(Barrier::new(nz(id), (x, y2, x2, y2)));
+            dir_map.insert(id, NudgeDir::Bottom);
+            id += 1;
+        }
+        if !has_top_neighbor(regions, region) {
+            barriers.push(Barrier::new(nz(id), (x, y, x2, y)));
+            dir_map.insert(id, NudgeDir::Top);
+            id += 1;
+        }
     }
     (barriers, dir_map)
 }
@@ -562,7 +644,10 @@ mod tests {
 
     #[test]
     fn evdev_to_mouse_button_unknown() {
-        assert!(matches!(evdev_to_mouse_button(0x115), MouseButton::Other(_)));
+        assert!(matches!(
+            evdev_to_mouse_button(0x115),
+            MouseButton::Other(_)
+        ));
     }
 
     #[test]

@@ -11,16 +11,29 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
-use wayflow_proto::{MouseButton, Modifiers, ScreenInfo};
+use wayflow_proto::{Modifiers, MouseButton, ScreenInfo};
 
 use crate::telemetry::Telemetry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
-    MouseMoveAbs { x: f64, y: f64 },
-    MouseButton  { button: MouseButton, pressed: bool },
-    Scroll       { dx: f64, dy: f64 },
-    Key          { keycode: u32, pressed: bool, modifiers: Modifiers },
+    MouseMoveAbs {
+        x: f64,
+        y: f64,
+    },
+    MouseButton {
+        button: MouseButton,
+        pressed: bool,
+    },
+    Scroll {
+        dx: f64,
+        dy: f64,
+    },
+    Key {
+        keycode: u32,
+        pressed: bool,
+        modifiers: Modifiers,
+    },
 }
 
 pub trait CaptureBackend: Send + 'static {
@@ -65,7 +78,10 @@ pub fn start_capture(
     return rdev_backend::backend().start(tx, release_rx, monitors_tx, telemetry);
 
     #[allow(unreachable_code)]
-    { let _ = (tx, release_rx, monitors_tx, telemetry); Err(anyhow::anyhow!("no capture backend for this platform")) }
+    {
+        let _ = (tx, release_rx, monitors_tx, telemetry);
+        Err(anyhow::anyhow!("no capture backend for this platform"))
+    }
 }
 
 #[cfg(test)]
@@ -76,9 +92,16 @@ mod tests {
     fn input_event_variants_are_debug_and_clone() {
         let events = [
             InputEvent::MouseMoveAbs { x: 1.0, y: 2.0 },
-            InputEvent::MouseButton { button: MouseButton::Left, pressed: true },
+            InputEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: true,
+            },
             InputEvent::Scroll { dx: 0.5, dy: -1.5 },
-            InputEvent::Key { keycode: 65, pressed: false, modifiers: Modifiers::default() },
+            InputEvent::Key {
+                keycode: 65,
+                pressed: false,
+                modifiers: Modifiers::default(),
+            },
         ];
         for e in &events {
             let cloned = e.clone();

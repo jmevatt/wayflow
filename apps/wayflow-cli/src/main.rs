@@ -1,6 +1,9 @@
 // Hide the Windows console window in release builds so the tray app
 // doesn't pop a black cmd window. Debug builds keep the console for stderr.
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -79,10 +82,12 @@ fn main() -> Result<()> {
                 } else {
                     let path = cli_config.unwrap_or_else(ClientConfig::default_path);
                     ClientConfig::load(&path)
-                        .with_context(|| format!(
-                            "no --server given and could not load client config from {}",
-                            path.display()
-                        ))?
+                        .with_context(|| {
+                            format!(
+                                "no --server given and could not load client config from {}",
+                                path.display()
+                            )
+                        })?
                         .server_addr()
                 };
                 wayflow_client::client::run(addr, hostname()).await
@@ -114,8 +119,8 @@ fn log_basename_for(cmd: &Command) -> &'static str {
 /// Returns a WorkerGuard that MUST be held by main to flush the non-blocking
 /// file writer on shutdown.
 fn init_tracing(log_basename: &'static str) -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    let stderr_filter = EnvFilter::try_from_env("WAYFLOW_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let stderr_filter =
+        EnvFilter::try_from_env("WAYFLOW_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     // Separate filter for the file -- always include debug so the rotating
     // log has more detail than what the user normally sees on stderr.
     let file_filter = EnvFilter::new(
@@ -130,8 +135,17 @@ fn init_tracing(log_basename: &'static str) -> Result<tracing_appender::non_bloc
     let (file_writer, guard) = tracing_appender::non_blocking(appender);
 
     tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(std::io::stderr).with_filter(stderr_filter))
-        .with(fmt::layer().json().with_writer(file_writer).with_filter(file_filter))
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_filter),
+        )
+        .with(
+            fmt::layer()
+                .json()
+                .with_writer(file_writer)
+                .with_filter(file_filter),
+        )
         .init();
 
     tracing::info!("logging to {}/{}.<date>", log_dir.display(), log_basename);
@@ -149,18 +163,20 @@ fn log_dir() -> std::path::PathBuf {
 fn hostname() -> String {
     // HOSTNAME env var (set by most Linux shells)
     if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() { return h; }
+        if !h.is_empty() {
+            return h;
+        }
     }
     // gethostname(2) -- works on Linux and macOS
     let mut buf = [0u8; 256];
-    let ok = unsafe {
-        libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
-    };
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if ok == 0 {
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         if let Ok(s) = std::str::from_utf8(&buf[..end]) {
             let s = s.trim().to_string();
-            if !s.is_empty() { return s; }
+            if !s.is_empty() {
+                return s;
+            }
         }
     }
     "wayflow".to_string()

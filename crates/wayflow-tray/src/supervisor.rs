@@ -132,7 +132,9 @@ impl Supervisor {
     /// (or Stopped on clean exit). Call this from the UI tick.
     pub fn poll(&self) {
         let mut g = self.inner.lock().unwrap();
-        let Some(child) = g.child.as_mut() else { return };
+        let Some(child) = g.child.as_mut() else {
+            return;
+        };
         match child.try_wait() {
             Ok(Some(status)) => {
                 let mode = g.state.mode().unwrap_or(Mode::Server);
@@ -140,7 +142,10 @@ impl Supervisor {
                 g.state = if status.success() {
                     State::Stopped
                 } else {
-                    State::Crashed { mode, code: status.code() }
+                    State::Crashed {
+                        mode,
+                        code: status.code(),
+                    }
                 };
             }
             Ok(None) => {} // still running

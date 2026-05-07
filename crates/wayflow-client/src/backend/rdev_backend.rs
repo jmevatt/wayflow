@@ -2,7 +2,7 @@
 
 use super::InjectBackend;
 use anyhow::Result;
-use rdev::{Button, EventType, simulate};
+use rdev::{simulate, Button, EventType};
 use wayflow_core::keymap::rdev_keys;
 use wayflow_proto::{Modifiers, MouseButton};
 
@@ -43,7 +43,10 @@ impl RdevInject {
             });
         }
         #[cfg(not(target_os = "macos"))]
-        Ok(Self { left_down: false, right_down: false })
+        Ok(Self {
+            left_down: false,
+            right_down: false,
+        })
     }
 }
 
@@ -84,7 +87,11 @@ fn mac_display_union() -> ((f64, f64), (u16, u16)) {
     let h = (max_y - min_y).max(1.0) as u16;
     tracing::debug!(
         "mac displays: {} active, union origin=({}, {}) size={}x{}",
-        ids.len(), min_x, min_y, w, h
+        ids.len(),
+        min_x,
+        min_y,
+        w,
+        h
     );
     ((min_x, min_y), (w, h))
 }
@@ -111,6 +118,13 @@ fn map_button(button: MouseButton) -> Button {
 }
 
 impl InjectBackend for RdevInject {
+    fn wake_display(&mut self) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        wake_display_macos();
+
+        Ok(())
+    }
+
     fn move_abs(&mut self, x: u16, y: u16) -> Result<()> {
         // On macOS, the Window Server tracks window drags via kCGEventLeftMouseDragged,
         // not kCGEventMouseMoved. rdev always emits MouseMoved, so we bypass it when
@@ -125,12 +139,15 @@ impl InjectBackend for RdevInject {
         }
 
         #[cfg(not(target_os = "macos"))]
-        sim(&EventType::MouseMove { x: x as f64, y: y as f64 })
+        sim(&EventType::MouseMove {
+            x: x as f64,
+            y: y as f64,
+        })
     }
 
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()> {
         match button {
-            MouseButton::Left  => self.left_down  = pressed,
+            MouseButton::Left => self.left_down = pressed,
             MouseButton::Right => self.right_down = pressed,
             _ => {}
         }
@@ -150,7 +167,7 @@ impl InjectBackend for RdevInject {
                 self.click_count = match self.last_press {
                     Some((prev_btn, prev_ts))
                         if prev_btn == button
-                        && now.duration_since(prev_ts) < DOUBLE_CLICK_WINDOW =>
+                            && now.duration_since(prev_ts) < DOUBLE_CLICK_WINDOW =>
                     {
                         (self.click_count + 1).min(3)
                     }
@@ -177,7 +194,10 @@ impl InjectBackend for RdevInject {
         return scroll_macos(dx, dy);
 
         #[cfg(not(target_os = "macos"))]
-        sim(&EventType::Wheel { delta_x: dx as i64, delta_y: dy as i64 })
+        sim(&EventType::Wheel {
+            delta_x: dx as i64,
+            delta_y: dy as i64,
+        })
     }
 
     fn screen_size(&self) -> (u16, u16) {
@@ -227,6 +247,67 @@ impl InjectBackend for RdevInject {
             sim(&EventType::KeyPress(key))
         } else {
             sim(&EventType::KeyRelease(key))
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wake_display_macos() {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_void};
+
+    type CFStringRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+    type CFStringEncoding = u32;
+    type IOReturn = i32;
+    type IOPMAssertionID = u32;
+    type IOPMUserActiveType = u32;
+
+    const K_CF_STRING_ENCODING_UTF8: CFStringEncoding = 0x08000100;
+    const K_IOPM_USER_ACTIVE_REMOTE: IOPMUserActiveType = 2;
+    const K_IOReturn_SUCCESS: IOReturn = 0;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: CFStringEncoding,
+        ) -> CFStringRef;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPMAssertionDeclareUserActivity(
+            user_details: CFStringRef,
+            user_type: IOPMUserActiveType,
+            assertion_id: *mut IOPMAssertionID,
+        ) -> IOReturn;
+    }
+
+    let details = CString::new("wayflow remote input").expect("static string has no nul");
+    unsafe {
+        let cf_details = CFStringCreateWithCString(
+            std::ptr::null(),
+            details.as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if cf_details.is_null() {
+            tracing::warn!("failed to create display wake reason");
+            return;
+        }
+
+        let mut assertion_id: IOPMAssertionID = 0;
+        let result = IOPMAssertionDeclareUserActivity(
+            cf_details,
+            K_IOPM_USER_ACTIVE_REMOTE,
+            &mut assertion_id,
+        );
+        CFRelease(cf_details);
+
+        if result != K_IOReturn_SUCCESS {
+            tracing::warn!("display wake request failed: IOReturn={result}");
         }
     }
 }
@@ -283,16 +364,18 @@ fn key_event_macos(cg_keycode: u16, pressed: bool) -> Result<()> {
 /// triple. Set on both Down and Up events of the same multi-click sequence.
 #[cfg(target_os = "macos")]
 fn mouse_button_macos(button: MouseButton, pressed: bool, click_state: i64) -> Result<()> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField};
+    use core_graphics::event::{
+        CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+    };
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let (etype, btn) = match (button, pressed) {
-        (MouseButton::Left,   true)  => (CGEventType::LeftMouseDown,   CGMouseButton::Left),
-        (MouseButton::Left,   false) => (CGEventType::LeftMouseUp,     CGMouseButton::Left),
-        (MouseButton::Right,  true)  => (CGEventType::RightMouseDown,  CGMouseButton::Right),
-        (MouseButton::Right,  false) => (CGEventType::RightMouseUp,    CGMouseButton::Right),
-        (MouseButton::Middle, true)  => (CGEventType::OtherMouseDown,  CGMouseButton::Center),
-        (MouseButton::Middle, false) => (CGEventType::OtherMouseUp,    CGMouseButton::Center),
+        (MouseButton::Left, true) => (CGEventType::LeftMouseDown, CGMouseButton::Left),
+        (MouseButton::Left, false) => (CGEventType::LeftMouseUp, CGMouseButton::Left),
+        (MouseButton::Right, true) => (CGEventType::RightMouseDown, CGMouseButton::Right),
+        (MouseButton::Right, false) => (CGEventType::RightMouseUp, CGMouseButton::Right),
+        (MouseButton::Middle, true) => (CGEventType::OtherMouseDown, CGMouseButton::Center),
+        (MouseButton::Middle, false) => (CGEventType::OtherMouseUp, CGMouseButton::Center),
         // Back/Forward/Other -- no native CGEventType; fall through to rdev.
         _ => {
             let rb = map_button(button);
@@ -367,8 +450,14 @@ mod tests {
         assert!(matches!(map_button(MouseButton::Right), Button::Right));
         assert!(matches!(map_button(MouseButton::Middle), Button::Middle));
         assert!(matches!(map_button(MouseButton::Back), Button::Unknown(4)));
-        assert!(matches!(map_button(MouseButton::Forward), Button::Unknown(5)));
-        assert!(matches!(map_button(MouseButton::Other(9)), Button::Unknown(9)));
+        assert!(matches!(
+            map_button(MouseButton::Forward),
+            Button::Unknown(5)
+        ));
+        assert!(matches!(
+            map_button(MouseButton::Other(9)),
+            Button::Unknown(9)
+        ));
     }
 
     #[test]

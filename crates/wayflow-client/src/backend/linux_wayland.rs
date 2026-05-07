@@ -13,7 +13,7 @@
 
 use super::InjectBackend;
 use anyhow::Result;
-use wayflow_proto::{MouseButton, Modifiers};
+use wayflow_proto::{Modifiers, MouseButton};
 
 pub struct LinuxWaylandInject {
     // TODO: reis::EiClient, pointer/keyboard interfaces
@@ -56,7 +56,7 @@ pub fn backend() -> Result<LinuxWaylandInject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wayflow_proto::{MouseButton, Modifiers};
+    use wayflow_proto::{Modifiers, MouseButton};
 
     #[test]
     fn new_returns_ok() {
@@ -104,7 +104,27 @@ mod tests {
     fn key_event_returns_ok() {
         let mut b = backend().unwrap();
         assert!(b.key_event(0, false, Modifiers::default()).is_ok());
-        assert!(b.key_event(65, true, Modifiers { shift: true, ..Default::default() }).is_ok());
-        assert!(b.key_event(u32::MAX, true, Modifiers { shift: true, ctrl: true, alt: true, meta: true }).is_ok());
+        assert!(b
+            .key_event(
+                65,
+                true,
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                }
+            )
+            .is_ok());
+        assert!(b
+            .key_event(
+                u32::MAX,
+                true,
+                Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    alt: true,
+                    meta: true
+                }
+            )
+            .is_ok());
     }
 }

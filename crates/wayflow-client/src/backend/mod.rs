@@ -1,9 +1,13 @@
 // Input injection backend trait + platform dispatch.
 
 use anyhow::Result;
-use wayflow_proto::{MouseButton, Modifiers};
+use wayflow_proto::{Modifiers, MouseButton};
 
 pub trait InjectBackend: Send + 'static {
+    /// Best-effort local display wake before injecting remote user activity.
+    fn wake_display(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn move_abs(&mut self, x: u16, y: u16) -> Result<()>;
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<()>;
     fn scroll(&mut self, dx: i16, dy: i16) -> Result<()>;
