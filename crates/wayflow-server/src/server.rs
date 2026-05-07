@@ -15,7 +15,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 use wayflow_core::{
-    config::{Config, Edge, remap_modifier_key},
+    config::{Config, Edge, remap_modifier_key, warn_unknown_modifier_names},
     layout::{ServerLayout, map_to_client},
     tls,
     transport,
@@ -64,6 +64,7 @@ pub async fn run(config: Config, config_path: PathBuf) -> Result<()> {
     let addr = format!("0.0.0.0:{}", config.server.port);
     let listener = TcpListener::bind(&addr).await?;
     info!("listening on {}", listener.local_addr()?);
+    log_modifier_maps(&config);
     let clients: Clients = Arc::new(RwLock::new(HashMap::new()));
 
     let (event_tx, event_rx) = mpsc::channel::<InputEvent>(256);
@@ -523,6 +524,24 @@ where
     Ok(())
 }
 
+/// Emit an info-level summary of every client's modifier_map and warn about
+/// any unrecognised names. Called at startup and after each successful
+/// hot-reload so the parsed map is always visible in the log -- if your
+/// modifier swap "isn't doing anything", grep for `modifier_map` in
+/// server.log.<date> to see what actually parsed.
+fn log_modifier_maps(config: &Config) {
+    for c in &config.clients {
+        if c.modifier_map.is_empty() {
+            continue;
+        }
+        let pairs: Vec<String> = c.modifier_map.iter()
+            .map(|(k, v)| format!("{k}->{v}"))
+            .collect();
+        info!("client {:?} modifier_map = [{}]", c.name, pairs.join(", "));
+        warn_unknown_modifier_names(&c.name, &c.modifier_map);
+    }
+}
+
 async fn watch_config(path: PathBuf, tx: watch::Sender<Arc<Config>>) {
     let mut last_modified: Option<SystemTime> = std::fs::metadata(&path)
         .ok()
@@ -537,6 +556,7 @@ async fn watch_config(path: PathBuf, tx: watch::Sender<Arc<Config>>) {
             match wayflow_core::config::Config::load(&path) {
                 Ok(cfg) => {
                     info!("config reloaded: {} client(s) configured", cfg.clients.len());
+                    log_modifier_maps(&cfg);
                     let _ = tx.send(Arc::new(cfg));
                 }
                 Err(e) => warn!("config reload failed (keeping current): {e:#}"),
