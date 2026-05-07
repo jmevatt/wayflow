@@ -87,15 +87,23 @@ async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemet
     }
 }
 
-/// HID usage codes for the standard modifier keys (left-side variants).
+/// HID usage codes for the standard modifier keys.
 /// EI's `KeyboardModifiers` event reports a state bitmap (shift/ctrl/alt/meta)
-/// without telling us which physical key is depressed; we always pick the
-/// left variant for synthesis. Either left or right releases the modifier
-/// flag at the macOS Window Server, so the choice is benign.
+/// without telling us which physical key is depressed; the synth-at-activation
+/// path always picks the left variant. The macOS Window Server tracks left
+/// and right modifier flags independently, so a synthesised L press paired
+/// with a real R release leaves the L flag stuck. `modifier_diff_actions`
+/// reconciles this on every modifier-bitmap change: if a bit transitions
+/// 1 -> 0 while the L variant is still in `held_keys`, it emits a synth
+/// release for whichever variant is held.
 const HID_LEFT_CTRL: u32 = 0xE0;
 const HID_LEFT_SHIFT: u32 = 0xE1;
 const HID_LEFT_ALT: u32 = 0xE2;
 const HID_LEFT_META: u32 = 0xE3;
+const HID_RIGHT_CTRL: u32 = 0xE4;
+const HID_RIGHT_SHIFT: u32 = 0xE5;
+const HID_RIGHT_ALT: u32 = 0xE6;
+const HID_RIGHT_META: u32 = 0xE7;
 
 fn modifier_hid_codes(mods: Modifiers) -> impl Iterator<Item = u32> {
     [
@@ -106,6 +114,50 @@ fn modifier_hid_codes(mods: Modifiers) -> impl Iterator<Item = u32> {
     ]
     .into_iter()
     .flatten()
+}
+
+/// Reconcile the modifier-bitmap diff against `held_keys` and return the
+/// synth Key events the caller should emit (in order).
+///
+/// Handles two asymmetries that leave a stuck modifier on the client:
+///
+/// 1. *Right-modifier held at activation.* The activation-time synth always
+///    presses the L variant, but EI's eventual KeyboardKey release carries
+///    the R keycode. On 1 -> 0 transition we emit a release for whichever
+///    variant is still in `held_keys`.
+///
+/// 2. *Bitmap-only compositors.* Some setups report modifier presses only
+///    via KeyboardModifiers, never as a KeyboardKey event. On 0 -> 1
+///    transition with no L or R variant tracked, we synth a press for L.
+fn modifier_diff_actions(
+    old_mods: Modifiers,
+    new_mods: Modifiers,
+    held_keys: &std::collections::HashSet<u32>,
+    active: bool,
+) -> Vec<(u32, bool)> {
+    if !active {
+        return Vec::new();
+    }
+    let mut actions = Vec::new();
+    for (old_bit, new_bit, left_hid, right_hid) in [
+        (old_mods.shift, new_mods.shift, HID_LEFT_SHIFT, HID_RIGHT_SHIFT),
+        (old_mods.ctrl,  new_mods.ctrl,  HID_LEFT_CTRL,  HID_RIGHT_CTRL),
+        (old_mods.alt,   new_mods.alt,   HID_LEFT_ALT,   HID_RIGHT_ALT),
+        (old_mods.meta,  new_mods.meta,  HID_LEFT_META,  HID_RIGHT_META),
+    ] {
+        if old_bit && !new_bit {
+            // 1 -> 0: release whichever synth-press is still tracked.
+            if held_keys.contains(&left_hid) {
+                actions.push((left_hid, false));
+            } else if held_keys.contains(&right_hid) {
+                actions.push((right_hid, false));
+            }
+        } else if !old_bit && new_bit && !held_keys.contains(&left_hid) && !held_keys.contains(&right_hid) {
+            // 0 -> 1 with no Key event tracking either variant: synth L.
+            actions.push((left_hid, true));
+        }
+    }
+    actions
 }
 
 pub struct LinuxWaylandCapture;
@@ -505,7 +557,33 @@ async fn handle_ei_event(
         }
 
         EiEvent::KeyboardModifiers(evt) => {
-            *modifiers = xkb_mods_to_proto(evt.depressed);
+            let new_mods = xkb_mods_to_proto(evt.depressed);
+            let old_mods = *modifiers;
+            *modifiers = new_mods;
+            for (hid, pressed) in
+                modifier_diff_actions(old_mods, new_mods, held_keys, active.is_some())
+            {
+                debug!(
+                    "modifier diff reconcile: {:#x} {}",
+                    hid,
+                    if pressed { "press" } else { "release" }
+                );
+                if pressed {
+                    held_keys.insert(hid);
+                } else {
+                    held_keys.remove(&hid);
+                }
+                emit_blocking(
+                    tx,
+                    InputEvent::Key {
+                        keycode: hid,
+                        pressed,
+                        modifiers: new_mods,
+                    },
+                    telemetry,
+                )
+                .await;
+            }
         }
 
         _ => {}
@@ -730,5 +808,98 @@ mod tests {
         let (barriers, dir_map) = build_barriers(&[]);
         assert!(barriers.is_empty());
         assert!(dir_map.is_empty());
+    }
+
+    fn shift_only() -> Modifiers {
+        Modifiers { shift: true, ctrl: false, alt: false, meta: false }
+    }
+    fn no_mods() -> Modifiers {
+        Modifiers::default()
+    }
+
+    #[test]
+    fn diff_releases_left_synth_when_right_was_physical() {
+        // Activation synthesised LeftShift; user releases physical RightShift.
+        // EI bitmap drops shift; we should emit a release for LeftShift.
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_LEFT_SHIFT);
+        let actions = modifier_diff_actions(shift_only(), no_mods(), &held, true);
+        assert_eq!(actions, vec![(HID_LEFT_SHIFT, false)]);
+    }
+
+    #[test]
+    fn diff_releases_right_when_only_right_held() {
+        // Pathological case: only RightShift was tracked (e.g. via KeyboardKey
+        // before bitmap fired). Bitmap drops shift; release the R variant.
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_RIGHT_SHIFT);
+        let actions = modifier_diff_actions(shift_only(), no_mods(), &held, true);
+        assert_eq!(actions, vec![(HID_RIGHT_SHIFT, false)]);
+    }
+
+    #[test]
+    fn diff_no_release_when_neither_variant_held() {
+        // Bitmap drops shift but neither L nor R is tracked -- the matching
+        // KeyboardKey release already cleared held_keys, nothing to do.
+        let held = std::collections::HashSet::new();
+        let actions = modifier_diff_actions(shift_only(), no_mods(), &held, true);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn diff_synths_press_when_bitmap_only_compositor() {
+        // 0 -> 1 transition with nothing in held_keys: synth a Left press
+        // so the mac client sees the modifier go down.
+        let held = std::collections::HashSet::new();
+        let actions = modifier_diff_actions(no_mods(), shift_only(), &held, true);
+        assert_eq!(actions, vec![(HID_LEFT_SHIFT, true)]);
+    }
+
+    #[test]
+    fn diff_no_press_when_keyboardkey_already_tracked() {
+        // 0 -> 1 with the L variant already tracked (KeyboardKey fired first).
+        // No synth press needed.
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_LEFT_SHIFT);
+        let actions = modifier_diff_actions(no_mods(), shift_only(), &held, true);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn diff_no_press_when_right_already_tracked() {
+        // 0 -> 1 with the R variant tracked (user pressed right shift mid-session).
+        // No synth press for L.
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_RIGHT_SHIFT);
+        let actions = modifier_diff_actions(no_mods(), shift_only(), &held, true);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn diff_skips_when_inactive() {
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_LEFT_SHIFT);
+        let actions = modifier_diff_actions(shift_only(), no_mods(), &held, false);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn diff_handles_all_modifiers_at_once() {
+        let mut held = std::collections::HashSet::new();
+        held.insert(HID_LEFT_SHIFT);
+        held.insert(HID_RIGHT_CTRL);
+        held.insert(HID_LEFT_ALT);
+        held.insert(HID_LEFT_META);
+        let all = Modifiers { shift: true, ctrl: true, alt: true, meta: true };
+        let actions = modifier_diff_actions(all, no_mods(), &held, true);
+        assert_eq!(
+            actions,
+            vec![
+                (HID_LEFT_SHIFT, false),
+                (HID_RIGHT_CTRL, false),
+                (HID_LEFT_ALT, false),
+                (HID_LEFT_META, false),
+            ]
+        );
     }
 }
