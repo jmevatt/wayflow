@@ -227,7 +227,7 @@ impl InjectBackend for RdevInject {
         (1920, 1080)
     }
 
-    fn key_event(&mut self, keycode: u32, pressed: bool, _modifiers: Modifiers) -> Result<()> {
+    fn key_event(&mut self, keycode: u32, pressed: bool, modifiers: Modifiers) -> Result<()> {
         // On macOS, post the keyboard event directly via core-graphics.
         // rdev::simulate keeps internal modifier-flag state on macOS; over a
         // long session the state can drift (a press without a corresponding
@@ -237,11 +237,13 @@ impl InjectBackend for RdevInject {
         #[cfg(target_os = "macos")]
         {
             if let Some(cg_keycode) = wayflow_core::keymap::hid_to_cg_keycode(keycode) {
-                return key_event_macos(cg_keycode, pressed);
+                return key_event_macos(cg_keycode, pressed, modifiers);
             }
             // Unmapped HID code -- fall back to rdev so we at least try.
             tracing::debug!("HID {:#x} has no CG mapping; falling back to rdev", keycode);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = modifiers; // Windows path: rdev tracks modifiers via SendInput state.
 
         let key = match rdev_keys::hid_to_rdev(keycode) {
             Some(k) => k,
@@ -344,22 +346,86 @@ fn scroll_macos(dx: i16, dy: i16) -> Result<()> {
     Ok(())
 }
 
-/// Post a keyboard down/up CGEvent for the given CG virtual keycode.
-/// We deliberately do NOT set CGEvent.flags here -- macOS's Window Server
-/// tracks modifier state from the press/release sequence of modifier
-/// keycodes, and overriding the flags is what causes rdev's drift bugs.
-/// As long as we send well-formed press/release pairs (which the server's
-/// held_keys flush guarantees on cursor return + capture deactivation),
-/// the Window Server's modifier tracking stays consistent.
+/// Bitmask values for `CGEventFlags`. We want `bitflags::Flags::from_bits_truncate`
+/// semantics but the exact `CGEventFlags` type lives in core-graphics; since we
+/// only ever combine the four standard modifier bits we hand-construct the mask
+/// as a u64 and feed it through `set_flags`. Values from
+/// `<CoreGraphics/CGEventTypes.h>`.
 #[cfg(target_os = "macos")]
-fn key_event_macos(cg_keycode: u16, pressed: bool) -> Result<()> {
-    use core_graphics::event::{CGEvent, CGEventTapLocation};
+const CG_FLAG_SHIFT: u64 = 0x00020000;
+#[cfg(target_os = "macos")]
+const CG_FLAG_CONTROL: u64 = 0x00040000;
+#[cfg(target_os = "macos")]
+const CG_FLAG_ALTERNATE: u64 = 0x00080000;
+#[cfg(target_os = "macos")]
+const CG_FLAG_COMMAND: u64 = 0x00100000;
+
+/// CG virtual keycodes that designate a modifier key. For these we must post
+/// `kCGEventFlagsChanged` events instead of keyDown/keyUp so that NSEvent
+/// `flagsChanged:` subscribers (terminal emulators, browsers, editors) see
+/// the modifier transition. Posting keyDown for a modifier silently works at
+/// the Window Server flag layer most of the time but does not deliver a
+/// flagsChanged event to apps -- that's the source of the stuck-modifier bug.
+#[cfg(target_os = "macos")]
+fn is_modifier_cg_keycode(cg_keycode: u16) -> bool {
+    matches!(
+        cg_keycode,
+        0x37 | 0x38 | 0x39 | 0x3A | 0x3B | 0x3C | 0x3D | 0x3E
+        // Cmd  Shift  CapsLk  Opt   Ctrl   RShift ROpt   RCtrl
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn modifiers_to_cg_flags(m: Modifiers) -> u64 {
+    let mut f = 0u64;
+    if m.shift { f |= CG_FLAG_SHIFT; }
+    if m.ctrl  { f |= CG_FLAG_CONTROL; }
+    if m.alt   { f |= CG_FLAG_ALTERNATE; }
+    if m.meta  { f |= CG_FLAG_COMMAND; }
+    f
+}
+
+/// Post a keyboard CGEvent for the given CG virtual keycode.
+///
+/// Two macOS quirks we have to work around:
+///
+/// 1. **Modifier keys must be posted as `kCGEventFlagsChanged`**, not
+///    keyDown/keyUp. Apps that subscribe to `NSEvent.flagsChanged` (which is
+///    most non-trivial apps -- terminal, browsers, editors) ignore keyDown
+///    for modifier keycodes. Without flagsChanged, the app keeps thinking
+///    the modifier is held even after we release it: classic stuck-shift /
+///    stuck-alt bug.
+///
+/// 2. **Explicit `CGEventFlags` must be set on every event**, not relied on
+///    via `HIDSystemState`. The system's HID flag state lags behind a freshly
+///    posted modifier event, so a keyDown(slash) created right after a
+///    keyDown(shift) can read flags=0 and produce '/' instead of '?'. The
+///    server already tracks modifier state authoritatively (via the EI
+///    bitmap) and ships it in `S2C::KeyEvent.modifiers`, so we forward that
+///    directly.
+#[cfg(target_os = "macos")]
+fn key_event_macos(cg_keycode: u16, pressed: bool, modifiers: Modifiers) -> Result<()> {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource failed"))?;
     let event = CGEvent::new_keyboard_event(source, cg_keycode, pressed)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
+
+    // For modifier keycodes, override the event type to FlagsChanged. The
+    // Modifiers bitmap from the server reflects state AFTER this transition,
+    // so it already has the correct shift/ctrl/alt/meta bits for the post-
+    // press / post-release world.
+    if is_modifier_cg_keycode(cg_keycode) {
+        event.set_type(CGEventType::FlagsChanged);
+    }
+
+    let flags = core_graphics::event::CGEventFlags::from_bits_truncate(
+        modifiers_to_cg_flags(modifiers),
+    );
+    event.set_flags(flags);
+
     event.post(CGEventTapLocation::HID);
     Ok(())
 }
