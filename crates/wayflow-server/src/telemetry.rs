@@ -19,6 +19,11 @@ pub struct Telemetry {
     /// High value = same as above; sustained pressure on the per-client
     /// write channel.
     pub s2c_slow_sends: AtomicU64,
+    /// Capture-layer emit_blocking calls that took longer than the slow
+    /// threshold. High value = route_events couldn't drain fast enough and
+    /// the EI thread was held in send().await -- correct behavior (it
+    /// preserves key release ordering) but worth visibility on.
+    pub capture_slow_emits: AtomicU64,
     /// Number of SIGUSR1 dumps successfully emitted.
     pub dumps_emitted: AtomicU64,
 }
@@ -28,6 +33,7 @@ pub struct TelemetryView {
     pub input_events_dropped_full: u64,
     pub input_events_dropped_closed: u64,
     pub s2c_slow_sends: u64,
+    pub capture_slow_emits: u64,
     pub dumps_emitted: u64,
 }
 
@@ -37,6 +43,7 @@ impl Telemetry {
             input_events_dropped_full:   self.input_events_dropped_full.load(Ordering::Relaxed),
             input_events_dropped_closed: self.input_events_dropped_closed.load(Ordering::Relaxed),
             s2c_slow_sends:              self.s2c_slow_sends.load(Ordering::Relaxed),
+            capture_slow_emits:          self.capture_slow_emits.load(Ordering::Relaxed),
             dumps_emitted:               self.dumps_emitted.load(Ordering::Relaxed),
         }
     }

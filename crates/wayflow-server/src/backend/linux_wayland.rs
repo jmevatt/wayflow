@@ -30,12 +30,14 @@ use wayflow_proto::{Modifiers, MouseButton, ScreenInfo};
 use super::{CaptureBackend, InputEvent};
 use crate::telemetry::Telemetry;
 
-/// Non-blocking emit into the InputEvent pipeline. We deliberately do NOT
-/// use `await`-blocking `send` here: if `route_events` is back-pressured
-/// (e.g. client TLS write is slow), blocking would propagate back-pressure
-/// into libei's internal buffer and EI events would be silently dropped
-/// inside libei with no log line. `try_send` makes the back-pressure
-/// observable in OUR logs, even though we still drop the event.
+/// Non-blocking emit for idempotent / floody events (cursor motion, scroll
+/// ticks). Drops on a full channel rather than back-pressuring libei, since
+/// these events tolerate loss: a missed cursor sample is corrected by the
+/// next sample, and a missed scroll tick is a one-frame stutter.
+///
+/// Do NOT use this for state-changing events (Button, Key) -- a dropped key
+/// release leaves the client with a phantom held key (commonly: stuck shift
+/// after fast typing). Those go through `emit_blocking` instead.
 fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
     use mpsc::error::TrySendError;
     match tx.try_send(event) {
@@ -48,6 +50,28 @@ fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Teleme
             telemetry.input_events_dropped_closed.fetch_add(1, Ordering::Relaxed);
             // route_events task has exited -- server is shutting down. Ignore.
         }
+    }
+}
+
+/// Blocking emit for state-changing events (Button, Key, synthesized
+/// modifier press/release). Mirrors `server::send_s2c_timed`: we accept
+/// back-pressure rather than drop, because dropping a key release would
+/// leave the client holding a phantom key (typed as `Shift+a` -> shift-up
+/// dropped -> mac client thinks shift is still held -> every subsequent
+/// keystroke is uppercase). Logs a slow-emit warning + telemetry counter
+/// so back-pressure stays visible without sacrificing correctness.
+async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
+    const SLOW_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(50);
+    let start = tokio::time::Instant::now();
+    if tx.send(event).await.is_err() {
+        // Receiver gone -- server shutting down. Match try_emit's silent close handling.
+        telemetry.input_events_dropped_closed.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let elapsed = start.elapsed();
+    if elapsed > SLOW_THRESHOLD {
+        telemetry.capture_slow_emits.fetch_add(1, Ordering::Relaxed);
+        warn!("capture emit took {:?} -- route_events is back-pressured", elapsed);
     }
 }
 
@@ -199,11 +223,11 @@ async fn capture_async(
                 for hid in modifier_hid_codes(modifiers) {
                     if held_keys.insert(hid) {
                         debug!("synth modifier press at activation: {hid:#x}");
-                        try_emit(&tx, InputEvent::Key {
+                        emit_blocking(&tx, InputEvent::Key {
                             keycode: hid,
                             pressed: true,
                             modifiers,
-                        }, &telemetry);
+                        }, &telemetry).await;
                     }
                 }
 
@@ -226,11 +250,11 @@ async fn capture_async(
                 // mouse-cross to trigger its own held_keys flush.
                 for hid in held_keys.drain() {
                     debug!("synth release at deactivation: {hid:#x}");
-                    try_emit(&tx, InputEvent::Key {
+                    emit_blocking(&tx, InputEvent::Key {
                         keycode: hid,
                         pressed: false,
                         modifiers: Modifiers::default(),
-                    }, &telemetry);
+                    }, &telemetry).await;
                 }
                 active = None;
             }
@@ -324,7 +348,7 @@ async fn handle_ei_event(
             use reis::ei::button::ButtonState;
             let button = evdev_to_mouse_button(evt.button);
             let pressed = evt.state == ButtonState::Press;
-            try_emit(tx, InputEvent::MouseButton { button, pressed }, telemetry);
+            emit_blocking(tx, InputEvent::MouseButton { button, pressed }, telemetry).await;
         }
 
         EiEvent::ScrollDelta(evt) if active.is_some() => {
@@ -355,8 +379,11 @@ async fn handle_ei_event(
             use reis::ei::keyboard::KeyState;
             if let Some(hid) = wayflow_core::keymap::evdev::evdev_to_hid(evt.key) {
                 let pressed = evt.state == KeyState::Press;
+                // Update held_keys AFTER successful emit so that if the
+                // emit drops (channel closed during shutdown), the
+                // deactivation flush still has a record to release.
+                emit_blocking(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers }, telemetry).await;
                 if pressed { held_keys.insert(hid); } else { held_keys.remove(&hid); }
-                try_emit(tx, InputEvent::Key { keycode: hid, pressed, modifiers: *modifiers }, telemetry);
             } else {
                 debug!("evdev key {} has no HID mapping, skipping", evt.key);
             }
