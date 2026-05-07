@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Distribution definition for the Wayflow .pkg installer.
+
+  The <domains> element with enable_currentUserHome + enable_localSystem
+  surfaces macOS Installer.app's standard "Install for me only" or
+  "Install for all users on this computer" radio chooser. When the user
+  picks "for me only," Installer.app rewrites the component package's
+  /Applications install location to ~/Applications automatically. No
+  postinstall script needed.
+
+  Built by packaging/macos/build-pkg.sh after cargo-packager produces
+  the .app bundle.
+-->
+<installer-gui-script minSpecVersion="1">
+    <title>Wayflow</title>
+    <organization>com.evattlabs</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="false"/>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.evattlabs.wayflow"/>
+        </line>
+    </choices-outline>
+
+    <choice id="default"/>
+    <choice id="com.evattlabs.wayflow" visible="false">
+        <pkg-ref id="com.evattlabs.wayflow"/>
+    </choice>
+
+    <pkg-ref id="com.evattlabs.wayflow" version="0.1.0" onConclusion="none">wayflow-component.pkg</pkg-ref>
+</installer-gui-script>
