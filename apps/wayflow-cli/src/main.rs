@@ -17,8 +17,11 @@ struct Cli {
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 
+    /// Subcommand to run. Defaults to `tray` so double-clicking the bundled
+    /// .app on macOS / .exe on Windows opens the tray supervisor without
+    /// needing a launcher shim.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -43,12 +46,13 @@ fn main() -> Result<()> {
     wayflow_core::tls::install_default_crypto_provider();
 
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Command::Tray);
 
     // Hold the guard for the full lifetime of main -- when it drops the
     // background flusher thread joins and any buffered log lines are written.
-    let _log_guard = init_tracing(log_basename_for(&cli.command))?;
+    let _log_guard = init_tracing(log_basename_for(&command))?;
 
-    match cli.command {
+    match command {
         // Tray runs the eframe/winit event loop on the main thread; no tokio
         // runtime here -- the supervised child process gets its own.
         Command::Tray => wayflow_tray::run(),

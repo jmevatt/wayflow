@@ -28,3 +28,32 @@ dirs       = { workspace = true }
 # CLI argument parsing
 clap = { version = "4", features = ["derive"] }
 libc = { workspace = true }
+
+# cargo-packager configuration -- see https://docs.crabnebula.dev/cargo-packager/
+# Build packages with: `cargo packager --release` (must `cargo install cargo-packager` first).
+[package.metadata.packager]
+product-name      = "Wayflow"
+identifier        = "com.evattlabs.wayflow"
+description       = "Wayland-native keyboard and mouse sharing across machines"
+long-description  = "Share one keyboard and mouse across multiple machines over the network. Successor to Synergy / Barrier with first-class Wayland support via the XDG InputCapture portal, and native CGEvent injection on macOS."
+authors           = ["Jordan Evatt <jordan@evattlabs.com>"]
+publisher         = "Evatt Labs"
+homepage          = "https://github.com/jmevatt/wayflow"
+license-file      = "../../LICENSE"
+out-dir           = "../../target/packages"
+
+# The single multi-call binary. Subcommand defaults to `tray` so the .app /
+# .exe entry point lands in the tray supervisor without a launcher shim.
+binaries = [
+  { path = "wayflow", main = true },
+]
+
+# macOS bundle settings. The Info.plist already in the tree carries
+# LSUIElement (menu-bar-only, no dock icon) and the bundle metadata.
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+info-plist-path        = "../../crates/wayflow-tray/macos/Info.plist"
+# signing-identity     = "Developer ID Application: Jordan Evatt (TEAMID)"
+# Producing notarized DMGs is a separate batch -- requires Apple Developer
+# ID + notarytool credentials. For now, builds are unsigned (users will
+# need to right-click -> Open the first time, or run `xattr -d com.apple.quarantine`).
