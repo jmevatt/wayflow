@@ -28,6 +28,13 @@ pub struct RdevInject {
     click_count: i64,
     #[cfg(target_os = "macos")]
     wake_display_supported: bool,
+    /// macOS: set of HID keycodes the client believes are currently held.
+    /// Authoritative source for `CGEventFlags` so the flags posted on every
+    /// CGEvent reflect the actual logical modifier state -- not whatever the
+    /// system's `HIDSystemState` happens to read at construction time, which
+    /// races with recently-posted modifier events.
+    #[cfg(target_os = "macos")]
+    mac_pressed_keys: std::collections::HashSet<u32>,
 }
 
 impl RdevInject {
@@ -43,6 +50,7 @@ impl RdevInject {
                 last_press: None,
                 click_count: 0,
                 wake_display_supported: true,
+                mac_pressed_keys: std::collections::HashSet::new(),
             });
         }
         #[cfg(not(target_os = "macos"))]
@@ -227,23 +235,39 @@ impl InjectBackend for RdevInject {
         (1920, 1080)
     }
 
-    fn key_event(&mut self, keycode: u32, pressed: bool, modifiers: Modifiers) -> Result<()> {
+    fn key_event(&mut self, keycode: u32, pressed: bool, _modifiers: Modifiers) -> Result<()> {
         // On macOS, post the keyboard event directly via core-graphics.
         // rdev::simulate keeps internal modifier-flag state on macOS; over a
         // long session the state can drift (a press without a corresponding
         // release, dropped events, etc.) and produce stuck-modifier symptoms
         // where keystrokes either do nothing or behave as if a phantom
         // modifier is held. Direct CGEvent injection has no internal state.
+        //
+        // We ignore the wire-protocol `modifiers` field on macOS and derive
+        // CGEventFlags from `mac_pressed_keys` instead. This mirrors deskflow
+        // / input-leap / barrier's OSXKeyState pattern: client tracks which
+        // keycodes are currently down based on the press/release stream,
+        // computes flags from that, and so the flags it puts on every event
+        // reflect actual post-transition state without depending on what the
+        // bitmap snapshot from the server happens to be at this point in
+        // the stream.
         #[cfg(target_os = "macos")]
         {
+            // Update local pressed-key set BEFORE deriving flags so a
+            // modifier keyDown sees itself in the post-transition state and
+            // a modifier keyUp does not.
+            if pressed {
+                self.mac_pressed_keys.insert(keycode);
+            } else {
+                self.mac_pressed_keys.remove(&keycode);
+            }
             if let Some(cg_keycode) = wayflow_core::keymap::hid_to_cg_keycode(keycode) {
-                return key_event_macos(cg_keycode, pressed, modifiers);
+                let flags_bits = pressed_hids_to_cg_flags(&self.mac_pressed_keys);
+                return key_event_macos(cg_keycode, pressed, flags_bits);
             }
             // Unmapped HID code -- fall back to rdev so we at least try.
             tracing::debug!("HID {:#x} has no CG mapping; falling back to rdev", keycode);
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = modifiers; // Windows path: rdev tracks modifiers via SendInput state.
 
         let key = match rdev_keys::hid_to_rdev(keycode) {
             Some(k) => k,
@@ -375,13 +399,24 @@ fn is_modifier_cg_keycode(cg_keycode: u16) -> bool {
     )
 }
 
+/// Derive the active CGEventFlags bitmap from the set of currently-pressed
+/// HID keycodes. Mirrors deskflow / input-leap / barrier's OSXKeyState
+/// approach: client maintains its own view of which physical keys are down
+/// and computes modifier flags locally rather than trusting any over-the-
+/// wire modifier hint, which is necessarily a snapshot at one point in the
+/// event stream and may not reflect the post-transition state we need.
 #[cfg(target_os = "macos")]
-fn modifiers_to_cg_flags(m: Modifiers) -> u64 {
+fn pressed_hids_to_cg_flags(pressed: &std::collections::HashSet<u32>) -> u64 {
     let mut f = 0u64;
-    if m.shift { f |= CG_FLAG_SHIFT; }
-    if m.ctrl  { f |= CG_FLAG_CONTROL; }
-    if m.alt   { f |= CG_FLAG_ALTERNATE; }
-    if m.meta  { f |= CG_FLAG_COMMAND; }
+    for &k in pressed {
+        match k {
+            0xE0 | 0xE4 => f |= CG_FLAG_CONTROL,
+            0xE1 | 0xE5 => f |= CG_FLAG_SHIFT,
+            0xE2 | 0xE6 => f |= CG_FLAG_ALTERNATE,
+            0xE3 | 0xE7 => f |= CG_FLAG_COMMAND,
+            _ => {}
+        }
+    }
     f
 }
 
@@ -399,12 +434,11 @@ fn modifiers_to_cg_flags(m: Modifiers) -> u64 {
 /// 2. **Explicit `CGEventFlags` must be set on every event**, not relied on
 ///    via `HIDSystemState`. The system's HID flag state lags behind a freshly
 ///    posted modifier event, so a keyDown(slash) created right after a
-///    keyDown(shift) can read flags=0 and produce '/' instead of '?'. The
-///    server already tracks modifier state authoritatively (via the EI
-///    bitmap) and ships it in `S2C::KeyEvent.modifiers`, so we forward that
-///    directly.
+///    keyDown(shift) can read flags=0 and produce '/' instead of '?'.
+///    `flags_bits` is the post-transition flag bitmap derived locally from
+///    `mac_pressed_keys` -- see `key_event` in the impl block.
 #[cfg(target_os = "macos")]
-fn key_event_macos(cg_keycode: u16, pressed: bool, modifiers: Modifiers) -> Result<()> {
+fn key_event_macos(cg_keycode: u16, pressed: bool, flags_bits: u64) -> Result<()> {
     use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -413,17 +447,11 @@ fn key_event_macos(cg_keycode: u16, pressed: bool, modifiers: Modifiers) -> Resu
     let event = CGEvent::new_keyboard_event(source, cg_keycode, pressed)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
 
-    // For modifier keycodes, override the event type to FlagsChanged. The
-    // Modifiers bitmap from the server reflects state AFTER this transition,
-    // so it already has the correct shift/ctrl/alt/meta bits for the post-
-    // press / post-release world.
     if is_modifier_cg_keycode(cg_keycode) {
         event.set_type(CGEventType::FlagsChanged);
     }
 
-    let flags = core_graphics::event::CGEventFlags::from_bits_truncate(
-        modifiers_to_cg_flags(modifiers),
-    );
+    let flags = core_graphics::event::CGEventFlags::from_bits_truncate(flags_bits);
     event.set_flags(flags);
 
     event.post(CGEventTapLocation::HID);
