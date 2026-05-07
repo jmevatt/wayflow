@@ -7,6 +7,7 @@
 //   4. Enable capture.
 //   5. Loop: wait for Activated signal, forward EI events until release_rx fires.
 //   6. On release_rx: call InputCapture::release(), loop back to step 5.
+//   7. On ZonesChanged: close the stale session and rebuild from step 1.
 //
 // GNOME >= 45 supports InputCapture (portal version 1).
 
@@ -138,7 +139,46 @@ async fn capture_async(
     info!("connecting to XDG InputCapture portal");
 
     let portal = InputCapture::new().await.context("InputCapture portal")?;
+    let mut zones_changed_stream = portal
+        .receive_zones_changed()
+        .await
+        .context("receive_zones_changed")?;
 
+    loop {
+        match capture_session(
+            &portal,
+            &mut zones_changed_stream,
+            &tx,
+            &mut release_rx,
+            &monitors_tx,
+            &telemetry,
+        )
+        .await?
+        {
+            CaptureSessionOutcome::ZonesChanged => {
+                info!("display zones changed; rebuilding InputCapture session");
+            }
+            CaptureSessionOutcome::Stopped => break,
+        }
+    }
+
+    Ok(())
+}
+
+enum CaptureSessionOutcome {
+    ZonesChanged,
+    Stopped,
+}
+
+async fn capture_session(
+    portal: &InputCapture<'_>,
+    zones_changed_stream: &mut (impl futures::Stream<Item = ashpd::desktop::input_capture::ZonesChanged>
+              + Unpin),
+    tx: &mpsc::Sender<InputEvent>,
+    release_rx: &mut mpsc::Receiver<()>,
+    monitors_tx: &watch::Sender<Vec<ScreenInfo>>,
+    telemetry: &Telemetry,
+) -> Result<CaptureSessionOutcome> {
     let capabilities = Capabilities::Keyboard | Capabilities::Pointer;
     let (session, _) = portal
         .create_session(None, capabilities)
@@ -245,10 +285,10 @@ async fn capture_async(
                 let nudge_dir = nudge_dir_for_activation(&evt, &barrier_dirs);
                 debug!("capture activated id={activation_id:?} pos={pos:?} nudge_dir={nudge_dir:?}");
 
-                try_emit(&tx, InputEvent::MouseMoveAbs {
+                try_emit(tx, InputEvent::MouseMoveAbs {
                     x: pos.0 as f64,
                     y: pos.1 as f64,
-                }, &telemetry);
+                }, telemetry);
 
                 // Synthesize key-press events for any modifiers currently held.
                 // EI reports modifier state but does NOT replay individual key
@@ -259,11 +299,11 @@ async fn capture_async(
                 for hid in modifier_hid_codes(modifiers) {
                     if held_keys.insert(hid) {
                         debug!("synth modifier press at activation: {hid:#x}");
-                        emit_blocking(&tx, InputEvent::Key {
+                        emit_blocking(tx, InputEvent::Key {
                             keycode: hid,
                             pressed: true,
                             modifiers,
-                        }, &telemetry).await;
+                        }, telemetry).await;
                     }
                 }
 
@@ -286,11 +326,11 @@ async fn capture_async(
                 // mouse-cross to trigger its own held_keys flush.
                 for hid in held_keys.drain() {
                     debug!("synth release at deactivation: {hid:#x}");
-                    emit_blocking(&tx, InputEvent::Key {
+                    emit_blocking(tx, InputEvent::Key {
                         keycode: hid,
                         pressed: false,
                         modifiers: Modifiers::default(),
-                    }, &telemetry).await;
+                    }, telemetry).await;
                 }
                 active = None;
             }
@@ -299,7 +339,7 @@ async fn capture_async(
                 match ei_result {
                     Err(e) => { warn!("EI stream error: {e:?}"); break; }
                     Ok(event) => {
-                        handle_ei_event(event, &tx, &ei_context, &mut active, &mut modifiers, &mut held_keys, &mut scroll_remainder, &telemetry).await;
+                        handle_ei_event(event, tx, &ei_context, &mut active, &mut modifiers, &mut held_keys, &mut scroll_remainder, telemetry).await;
                     }
                 }
             }
@@ -323,11 +363,28 @@ async fn capture_async(
                 }
             }
 
-            else => break,
+            Some(evt) = zones_changed_stream.next() => {
+                info!("InputCapture zones changed: zone_set={:?}", evt.zone_set());
+                if let Some(state) = active.take() {
+                    let release_pos = match state.nudge_dir {
+                        Some(dir) => nudge_by_dir(state.activation_pos, dir),
+                        None => nudge_inside(state.activation_pos, &regions),
+                    };
+                    portal
+                        .release(&session, state.activation_id, Some(release_pos))
+                        .await
+                        .ok();
+                }
+                emit_blocking(tx, InputEvent::CaptureReset, telemetry).await;
+                session.close().await.ok();
+                return Ok(CaptureSessionOutcome::ZonesChanged);
+            }
+
+            else => return Ok(CaptureSessionOutcome::Stopped),
         }
     }
 
-    Ok(())
+    Ok(CaptureSessionOutcome::Stopped)
 }
 
 /// Which side of the desktop the triggered barrier is on.

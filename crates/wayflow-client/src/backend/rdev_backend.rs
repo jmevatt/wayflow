@@ -26,6 +26,8 @@ pub struct RdevInject {
     last_press: Option<(MouseButton, std::time::Instant)>,
     #[cfg(target_os = "macos")]
     click_count: i64,
+    #[cfg(target_os = "macos")]
+    wake_display_supported: bool,
 }
 
 impl RdevInject {
@@ -40,6 +42,7 @@ impl RdevInject {
                 display_size: size,
                 last_press: None,
                 click_count: 0,
+                wake_display_supported: true,
             });
         }
         #[cfg(not(target_os = "macos"))]
@@ -120,7 +123,11 @@ fn map_button(button: MouseButton) -> Button {
 impl InjectBackend for RdevInject {
     fn wake_display(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
-        wake_display_macos();
+        {
+            if self.wake_display_supported {
+                self.wake_display_supported = wake_display_macos();
+            }
+        }
 
         Ok(())
     }
@@ -252,7 +259,7 @@ impl InjectBackend for RdevInject {
 }
 
 #[cfg(target_os = "macos")]
-fn wake_display_macos() {
+fn wake_display_macos() -> bool {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_void};
 
@@ -295,7 +302,7 @@ fn wake_display_macos() {
         );
         if cf_details.is_null() {
             tracing::warn!("failed to create display wake reason");
-            return;
+            return false;
         }
 
         let mut assertion_id: IOPMAssertionID = 0;
@@ -308,8 +315,10 @@ fn wake_display_macos() {
 
         if result != K_IOReturn_SUCCESS {
             tracing::warn!("display wake request failed: IOReturn={result}");
+            return false;
         }
     }
+    true
 }
 
 /// Post a scroll CGEvent using LINE units so macOS applies its native scroll acceleration.

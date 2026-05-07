@@ -17,6 +17,7 @@ use crate::telemetry::Telemetry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
+    CaptureReset,
     MouseMoveAbs {
         x: f64,
         y: f64,
@@ -91,6 +92,7 @@ mod tests {
     #[test]
     fn input_event_variants_are_debug_and_clone() {
         let events = [
+            InputEvent::CaptureReset,
             InputEvent::MouseMoveAbs { x: 1.0, y: 2.0 },
             InputEvent::MouseButton {
                 button: MouseButton::Left,

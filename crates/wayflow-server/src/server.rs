@@ -459,6 +459,50 @@ async fn route_events(
                     }
                 }
             }
+
+            InputEvent::CaptureReset => {
+                if let Some(name) = active_client.as_ref().cloned() {
+                    let map = clients.read().await;
+                    if let Some((_, tx)) = map.get(&name) {
+                        let release_codes: Vec<u32> = {
+                            let cfg = config_rx.borrow();
+                            let client_cfg = cfg.clients.iter().find(|c| c.name == name);
+                            held_keys
+                                .iter()
+                                .map(|&hk| {
+                                    client_cfg
+                                        .map(|c| remap_modifier_key(&c.modifier_map, hk))
+                                        .unwrap_or(hk)
+                                })
+                                .collect()
+                        };
+                        for rk in release_codes {
+                            send_s2c_timed(
+                                tx,
+                                S2C::KeyEvent {
+                                    keycode: rk,
+                                    pressed: false,
+                                    modifiers: wayflow_proto::Modifiers::default(),
+                                },
+                                "KeyRelease(capture reset)",
+                                &telemetry,
+                            )
+                            .await;
+                        }
+                        send_s2c_timed(
+                            tx,
+                            S2C::LeaveScreen,
+                            "LeaveScreen(capture reset)",
+                            &telemetry,
+                        )
+                        .await;
+                    }
+                }
+                held_keys.clear();
+                active_client = None;
+                active_edge = None;
+                debug!("capture reset cleared active routing state");
+            }
         }
 
         // Publish state snapshot after each event so SIGUSR1 reads fresh data.
@@ -1190,6 +1234,35 @@ mod tests {
         })
         .await
         .unwrap();
+        drop(tx);
+        task.await.unwrap().unwrap();
+
+        let msgs = drain(&mut client_rx);
+        assert_eq!(msgs[0], S2C::EnterScreen { x: 0, y: 720 });
+        assert_eq!(msgs[1], S2C::LeaveScreen);
+    }
+
+    #[tokio::test]
+    async fn capture_reset_leaves_active_client() {
+        let (clients, mut client_rx) = connected_clients();
+        let (tx, rx) = mpsc::channel(16);
+        let task = tokio::spawn(route_events(
+            rx,
+            clients,
+            routing_config(),
+            server_monitors(),
+            dummy_release(),
+            Arc::new(Telemetry::default()),
+            watch::channel(RouteSnapshot::default()).0,
+        ));
+
+        tx.send(InputEvent::MouseMoveAbs {
+            x: 2559.0,
+            y: 720.0,
+        })
+        .await
+        .unwrap();
+        tx.send(InputEvent::CaptureReset).await.unwrap();
         drop(tx);
         task.await.unwrap().unwrap();
 
