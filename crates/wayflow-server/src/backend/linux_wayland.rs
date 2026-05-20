@@ -41,7 +41,7 @@ use crate::telemetry::Telemetry;
 /// Do NOT use this for state-changing events (Button, Key) -- a dropped key
 /// release leaves the client with a phantom held key (commonly: stuck shift
 /// after fast typing). Those go through `emit_blocking` instead.
-fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
+pub(super) fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
     use mpsc::error::TrySendError;
     match tx.try_send(event) {
         Ok(()) => {}
@@ -67,7 +67,7 @@ fn try_emit(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Teleme
 /// dropped -> mac client thinks shift is still held -> every subsequent
 /// keystroke is uppercase). Logs a slow-emit warning + telemetry counter
 /// so back-pressure stays visible without sacrificing correctness.
-async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
+pub(super) async fn emit_blocking(tx: &mpsc::Sender<InputEvent>, event: InputEvent, telemetry: &Telemetry) {
     const SLOW_THRESHOLD: tokio::time::Duration = tokio::time::Duration::from_millis(50);
     let start = tokio::time::Instant::now();
     if tx.send(event).await.is_err() {
@@ -190,28 +190,45 @@ async fn capture_async(
 ) -> Result<()> {
     info!("connecting to XDG InputCapture portal");
 
-    let portal = InputCapture::new().await.context("InputCapture portal")?;
+    let portal = match InputCapture::new().await {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = e.to_string();
+            // D-Bus / portal not available: fall back to wlroots layer-shell backend.
+            // xdg-desktop-portal-wlr does not implement InputCapture.
+            if msg.contains("not found")
+                || msg.contains("ServiceUnknown")
+                || msg.contains("NameHasNoOwner")
+            {
+                info!("InputCapture portal unavailable ({msg}); falling back to wlr layer-shell backend");
+                return super::linux_wayland_wlr::capture_async_wlr(
+                    tx,
+                    release_rx,
+                    monitors_tx,
+                    telemetry,
+                )
+                .await;
+            }
+            return Err(anyhow::Error::from(e).context("InputCapture portal"));
+        }
+    };
+
     let mut zones_changed_stream = portal
         .receive_zones_changed()
         .await
         .context("receive_zones_changed")?;
 
-    loop {
-        match capture_session(
-            &portal,
-            &mut zones_changed_stream,
-            &tx,
-            &mut release_rx,
-            &monitors_tx,
-            &telemetry,
-        )
-        .await?
-        {
-            CaptureSessionOutcome::ZonesChanged => {
-                info!("display zones changed; rebuilding InputCapture session");
-            }
-            CaptureSessionOutcome::Stopped => break,
-        }
+    while let CaptureSessionOutcome::ZonesChanged = capture_session(
+        &portal,
+        &mut zones_changed_stream,
+        &tx,
+        &mut release_rx,
+        &monitors_tx,
+        &telemetry,
+    )
+    .await?
+    {
+        info!("display zones changed; rebuilding InputCapture session");
     }
 
     Ok(())
@@ -461,6 +478,7 @@ struct ActivationState {
     cursor_pos: (f64, f64),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ei_event(
     event: EiEvent,
     tx: &mpsc::Sender<InputEvent>,
@@ -605,7 +623,7 @@ fn ei_interfaces() -> HashMap<&'static str, u32> {
     m
 }
 
-fn evdev_to_mouse_button(code: u32) -> MouseButton {
+pub(super) fn evdev_to_mouse_button(code: u32) -> MouseButton {
     match code {
         0x110 => MouseButton::Left,
         0x111 => MouseButton::Right,
@@ -616,7 +634,7 @@ fn evdev_to_mouse_button(code: u32) -> MouseButton {
     }
 }
 
-fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
+pub(super) fn xkb_mods_to_proto(depressed: u32) -> Modifiers {
     Modifiers {
         shift: (depressed & 0x01) != 0,
         ctrl: (depressed & 0x04) != 0,
@@ -731,8 +749,8 @@ fn build_barriers(regions: &[Region]) -> (Vec<Barrier>, HashMap<u32, NudgeDir>) 
     for region in regions {
         let x = region.x_offset();
         let y = region.y_offset();
-        let x2 = x + region.width() as i32 - 1;
-        let y2 = y + region.height() as i32 - 1;
+        let x2 = x + region.width() as i32;
+        let y2 = y + region.height() as i32;
         // Only place a barrier on edges that are the outer boundary of the desktop.
         // Skip edges where an adjacent monitor forms an internal seam.
         if !has_right_neighbor(regions, region) {

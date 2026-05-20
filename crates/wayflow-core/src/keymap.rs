@@ -668,12 +668,12 @@ pub fn hid_to_cg_keycode(hid: u32) -> Option<u16> {
         // Modifiers
         0xE0 => 0x3B, // LeftCtrl
         0xE1 => 0x38, // LeftShift
-        0xE2 => 0x3A, // LeftAlt   -> Option
-        0xE3 => 0x37, // LeftMeta  -> Command
+        0xE2 => 0x37, // LeftAlt   -> Command
+        0xE3 => 0x3A, // LeftMeta  -> Option
         0xE4 => 0x3E, // RightCtrl
         0xE5 => 0x3C, // RightShift
-        0xE6 => 0x3D, // RightAlt  -> RightOption
-        0xE7 => 0x36, // RightMeta -> RightCommand
+        0xE6 => 0x36, // RightAlt  -> RightCommand
+        0xE7 => 0x3D, // RightMeta -> RightOption
         _ => return None,
     })
 }
@@ -686,8 +686,8 @@ mod cg_tests {
     fn modifiers_have_cg_codes() {
         assert_eq!(hid_to_cg_keycode(0xE0), Some(0x3B)); // ctrl
         assert_eq!(hid_to_cg_keycode(0xE1), Some(0x38)); // shift
-        assert_eq!(hid_to_cg_keycode(0xE2), Some(0x3A)); // alt -> option
-        assert_eq!(hid_to_cg_keycode(0xE3), Some(0x37)); // meta -> command
+        assert_eq!(hid_to_cg_keycode(0xE2), Some(0x37)); // alt -> command
+        assert_eq!(hid_to_cg_keycode(0xE3), Some(0x3A)); // meta -> option
     }
 
     #[test]

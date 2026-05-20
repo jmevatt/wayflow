@@ -60,6 +60,9 @@ pub trait CaptureBackend: Send + 'static {
 #[cfg(target_os = "linux")]
 pub mod linux_wayland;
 
+#[cfg(target_os = "linux")]
+mod linux_wayland_wlr;
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod rdev_backend;
 

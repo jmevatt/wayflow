@@ -76,6 +76,14 @@ make dev-wayland-client    # client in another shell (wayland-test display)
 
 ---
 
+## Infrastructure
+
+- This machine is **helicon** (wayflow server, Linux/Wayland, NixOS)
+- NixOS config lives at `~/Code/foundation/nixos/` — make changes there, not via CLI tools
+- Firewall, services, packages, etc. are all managed through that config
+
+---
+
 ## Logging
 
 Set `WAYFLOW_LOG=debug` (or `trace`, `info`, `warn`, `error`) to control log level.
