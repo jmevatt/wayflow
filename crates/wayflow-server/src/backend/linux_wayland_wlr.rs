@@ -30,6 +30,10 @@ use wayland_protocols::wp::{
         zwp_keyboard_shortcuts_inhibit_manager_v1 as ks_mgr,
         zwp_keyboard_shortcuts_inhibitor_v1 as ks_inhib,
     },
+    pointer_constraints::zv1::client::{
+        zwp_locked_pointer_v1 as locked_ptr,
+        zwp_pointer_constraints_v1 as pc_mgr,
+    },
     relative_pointer::zv1::client::{
         zwp_relative_pointer_manager_v1 as rel_ptr_mgr,
         zwp_relative_pointer_v1 as rel_ptr,
@@ -94,6 +98,7 @@ struct ActiveCapture {
     layer_surface: lsv::ZwlrLayerSurfaceV1,
     viewport: wp_viewport::WpViewport,
     inhibitor: ks_inhib::ZwpKeyboardShortcutsInhibitorV1,
+    locked_pointer: Option<locked_ptr::ZwpLockedPointerV1>,
     activation_edge: Edge,
     output_idx: usize,
     /// Real screen position from wl_pointer (clamped). Used for cursor nudge on release.
@@ -110,6 +115,7 @@ struct State {
     layer_shell: Option<ls::ZwlrLayerShellV1>,
     vp_mgr: Option<vp_mgr::ZwlrVirtualPointerManagerV1>,
     ks_mgr: Option<ks_mgr::ZwpKeyboardShortcutsInhibitManagerV1>,
+    pc_mgr: Option<pc_mgr::ZwpPointerConstraintsV1>,
     spbuf_mgr: Option<spbuf::WpSinglePixelBufferManagerV1>,
     viewporter: Option<wp_viewporter::WpViewporter>,
 
@@ -283,11 +289,27 @@ impl State {
         let ks_mgr = self.ks_mgr.as_ref().expect("zwp_keyboard_shortcuts_inhibit_manager_v1");
         let inhibitor = ks_mgr.inhibit_shortcuts(&surface, seat, qh, ());
 
+        let locked_pointer = match (&self.pc_mgr, &self.pointer) {
+            (Some(pc), Some(ptr)) => Some(pc.lock_pointer(
+                &surface,
+                ptr,
+                None,
+                pc_mgr::Lifetime::Persistent,
+                qh,
+                (),
+            )),
+            _ => {
+                warn!("zwp_pointer_constraints_v1 unavailable — cursor will move on both screens");
+                None
+            }
+        };
+
         self.active = Some(ActiveCapture {
             surface,
             layer_surface,
             viewport,
             inhibitor,
+            locked_pointer,
             activation_edge,
             output_idx,
             cursor: cursor_pos,
@@ -299,6 +321,7 @@ impl State {
 
     fn destroy_overlay(&mut self) {
         if let Some(cap) = self.active.take() {
+            if let Some(lp) = cap.locked_pointer { lp.destroy(); }
             cap.inhibitor.destroy();
             cap.layer_surface.destroy();
             cap.viewport.destroy();
@@ -380,6 +403,8 @@ delegate_noop!(State: ignore wp_viewporter::WpViewporter);
 delegate_noop!(State: ignore wp_viewport::WpViewport);
 delegate_noop!(State: ignore ks_mgr::ZwpKeyboardShortcutsInhibitManagerV1);
 delegate_noop!(State: ignore ks_inhib::ZwpKeyboardShortcutsInhibitorV1);
+delegate_noop!(State: ignore pc_mgr::ZwpPointerConstraintsV1);
+delegate_noop!(State: ignore locked_ptr::ZwpLockedPointerV1);
 delegate_noop!(State: ignore rel_ptr_mgr::ZwpRelativePointerManagerV1);
 
 // wl_registry — bind globals as they are advertised.
@@ -419,6 +444,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
                 state.ks_mgr =
                     Some(registry.bind::<ks_mgr::ZwpKeyboardShortcutsInhibitManagerV1, _, _>(name, 1, qh, ()));
+            }
+            "zwp_pointer_constraints_v1" => {
+                state.pc_mgr =
+                    Some(registry.bind::<pc_mgr::ZwpPointerConstraintsV1, _, _>(name, 1, qh, ()));
             }
             "wp_single_pixel_buffer_manager_v1" => {
                 state.spbuf_mgr =
@@ -733,6 +762,7 @@ pub async fn capture_async_wlr(
         layer_shell: None,
         vp_mgr: None,
         ks_mgr: None,
+        pc_mgr: None,
         spbuf_mgr: None,
         viewporter: None,
         outputs: Vec::new(),
