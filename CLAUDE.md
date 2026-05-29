@@ -78,9 +78,9 @@ make dev-wayland-client    # client in another shell (wayland-test display)
 
 ## Infrastructure
 
-- This machine is **helicon** (wayflow server, Linux/Wayland, NixOS)
-- NixOS config lives at `~/Code/foundation/nixos/` — make changes there, not via CLI tools
-- Firewall, services, packages, etc. are all managed through that config
+- This machine is **helicon** (wayflow server, Linux/Wayland, CachyOS)
+- System packages managed via `pacman`/`paru` — dev deps already installed (see `flake.nix` for the canonical list)
+- Build tooling: `sccache` (compiler cache) + `mold` (linker) configured in `~/.cargo/config.toml`
 
 ---
 
@@ -95,7 +95,7 @@ Structured JSON logs are emitted when `WAYFLOW_LOG_JSON=1` is set.
 
 | Feature | Linux (Wayland) | macOS | Windows |
 |---------|:-:|:-:|:-:|
-| Client inject (mouse + keyboard) | stub | working | stub |
-| Server capture | stub | stub | stub |
+| Client inject (mouse + keyboard) | scaffolded | working | stub |
+| Server capture | working | TODO | TODO |
 | Clipboard sync | text/images | text/images | — |
 | TLS transport + handshake | complete | complete | complete |

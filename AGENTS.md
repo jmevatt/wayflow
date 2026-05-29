@@ -289,7 +289,6 @@ remap, and the layout edge math.
 ### Linux Wayland-to-Wayland (primary dev loop)
 
 ```bash
-nix develop                                   # gets you libei, weston, deps
 weston --socket=wayland-test &                # nested compositor as the "client"
 WAYFLOW_LOG=debug cargo run -p wayflow-cli -- server &
 WAYLAND_DISPLAY=wayland-test WAYFLOW_LOG=debug \
@@ -312,7 +311,7 @@ permissions, or codesign needs hardware -- guard with `#[cfg(...)]` or
 ## Build
 
 ```bash
-nix develop                          # Linux: gets you the toolchain + sys deps
+# Linux deps installed via pacman/paru -- flake.nix is the canonical dep list
 cargo build --workspace
 cargo check --workspace              # PR gate: must be warning-free
 
@@ -328,11 +327,9 @@ cargo build --release
 ./scripts/bundle-mac.sh && open target/Wayflow.app
 ```
 
-The Nix `devShell` provides: Rust stable + clippy + rust-analyzer, libei, wayland,
-wayland-protocols, weston (for the nested compositor), gtk3 + libayatana-appindicator
-(StatusNotifierItem stack consumed by the tray), and `xdotool` (libxdo, transitive
-dep of `tray-icon`). `LD_LIBRARY_PATH` is set so `libayatana-appindicator` is
-findable at runtime (`tray-icon` dlopens it).
+On Linux (CachyOS/Arch), install deps via `pacman`/`paru` -- `flake.nix` `devShell`
+is the canonical dep list and still works for Nix users. On Arch, `libayatana-appindicator`
+is on the system library path; no `LD_LIBRARY_PATH` override needed.
 
 ---
 
