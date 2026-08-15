@@ -1,0 +1,18 @@
+[package]
+name = "wayflow-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Phase 0 capture harness. Streams verbatim platform input events as NDJSON."
+
+[dependencies]
+wayflow-proto = { path = "../wayflow-proto" }
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+
+[lints]
+workspace = true

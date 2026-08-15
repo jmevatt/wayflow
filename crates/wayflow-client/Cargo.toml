@@ -1,0 +1,21 @@
+[package]
+name = "wayflow-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Receive side: accepts a forwarded input stream and injects it locally."
+
+[dependencies]
+wayflow-proto = { path = "../wayflow-proto" }
+wayflow-keymap = { path = "../wayflow-keymap" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+# core-graphics exposes raw pointers through this trait but does not re-export it, and
+# scroll events have to be built by hand because the crate wraps no constructor for them.
+foreign-types = "0.5"
+
+[lints]
+workspace = true

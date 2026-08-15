@@ -1,0 +1,19 @@
+[package]
+name = "wayflow-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Capture side: claims the pointer and keyboard at a screen edge and forwards them."
+
+[dependencies]
+wayflow-proto = { path = "../wayflow-proto" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[lints]
+workspace = true

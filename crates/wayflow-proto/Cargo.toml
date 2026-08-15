@@ -1,0 +1,15 @@
+[package]
+name = "wayflow-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire types for the wayflow probe harness. No I/O, no platform code."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
